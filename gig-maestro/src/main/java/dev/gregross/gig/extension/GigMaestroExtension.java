@@ -255,7 +255,17 @@ public class GigMaestroExtension extends ControllerExtension {
         String chosenReason;
 
         if (overrideValue != null && !overrideValue.isBlank()) {
-            chosen = Paths.get(overrideValue.trim());
+            // User-typed input -- could contain any platform-illegal character, not just '*'.
+            // Paths.get() throws InvalidPathException synchronously; catch it and fail loudly
+            // rather than crash the extension the same way the unguarded glob string did.
+            try {
+                chosen = Paths.get(overrideValue.trim());
+            } catch (java.nio.file.InvalidPathException e) {
+                return failLoudly(
+                    "the \"" + DEVICE_LIBRARY_OVERRIDE_LABEL + "\" preference is set to '"
+                    + overrideValue.trim() + "', which is not a valid filesystem path: "
+                    + e.getMessage());
+            }
             chosenReason = "explicit configuration (\"" + DEVICE_LIBRARY_OVERRIDE_LABEL + "\" preference)";
         } else {
             List<Path> candidates = discoverDeviceLibraryCandidates();
@@ -360,41 +370,101 @@ public class GigMaestroExtension extends ControllerExtension {
     /**
      * Resolves a path pattern containing exactly one wildcard-bearing segment (e.g.
      * {@code C:\Program Files\Bitwig Studio*\Library\devices}) to every existing directory that
-     * matches. {@link Files#newDirectoryStream(Path, String)} only globs the final path segment,
-     * so this walks to the parent of the wildcard segment, globs one level, then re-appends the
-     * fixed suffix that follows it.
+     * matches.
+     *
+     * <p><b>Deliberately operates on the pattern as a plain {@code String}, split on the path
+     * separator, until the wildcard segment has been isolated.</b> An earlier version of this
+     * method called {@code Paths.get(patternPath)} on the *entire* pattern string up front --
+     * including the literal {@code *} -- which crashed the extension live in Bitwig on Windows
+     * with {@code InvalidPathException: Illegal char <*> at index 30}: Windows' path parser
+     * rejects {@code *} as an illegal filename character the moment it tries to construct a
+     * {@link Path} from the string, before any segment-by-segment analysis ever runs. A {@code
+     * Path} object is only ever constructed here from a segment that has already been confirmed
+     * wildcard-free; the wildcard segment itself is resolved exclusively through {@link
+     * Files#newDirectoryStream(Path, String)}, which treats its glob argument as a pattern
+     * string matched against real directory-listing results, never as something parsed through
+     * the platform path parser. This is the fix the crash asked for: enumerate real filesystem
+     * entries and build only concrete, wildcard-free paths -- resolving to something wrong (or
+     * throwing) is the same defect in different clothes as silently returning empty.
      */
     private List<Path> globMatch(String patternPath) {
         List<Path> results = new ArrayList<>();
-        Path pattern = Paths.get(patternPath);
+
+        String separator = java.io.File.separator;
+        String normalized = patternPath.replace('/', java.io.File.separatorChar)
+            .replace('\\', java.io.File.separatorChar);
+        String[] segments = normalized.split(java.util.regex.Pattern.quote(separator), -1);
 
         int wildcardIndex = -1;
-        for (int i = 0; i < pattern.getNameCount(); i++) {
-            if (pattern.getName(i).toString().contains("*")) {
+        for (int i = 0; i < segments.length; i++) {
+            if (segments[i].contains("*")) {
                 wildcardIndex = i;
                 break;
             }
         }
+
         if (wildcardIndex < 0) {
-            if (Files.isDirectory(pattern)) {
-                results.add(pattern);
+            // No wildcard anywhere in the pattern -- safe to construct the literal path directly.
+            Path literal;
+            try {
+                literal = Paths.get(patternPath);
+            } catch (java.nio.file.InvalidPathException e) {
+                host.errorln("Gig Maestro: could not construct device library path '" + patternPath
+                    + "': " + e.getMessage());
+                return results;
+            }
+            if (Files.isDirectory(literal)) {
+                results.add(literal);
             }
             return results;
         }
 
-        Path parent = pattern.getRoot();
+        // Build the search root from ONLY the literal (wildcard-free) segments that precede the
+        // wildcard segment -- never touching the wildcard segment itself.
+        StringBuilder parentBuilder = new StringBuilder();
         for (int i = 0; i < wildcardIndex; i++) {
-            parent = (parent == null) ? Paths.get(pattern.getName(i).toString()) : parent.resolve(pattern.getName(i));
+            if (parentBuilder.length() > 0
+                && parentBuilder.charAt(parentBuilder.length() - 1) != java.io.File.separatorChar) {
+                parentBuilder.append(java.io.File.separatorChar);
+            }
+            parentBuilder.append(segments[i]);
         }
-        if (parent == null || !Files.isDirectory(parent)) {
+        Path parent;
+        try {
+            parent = Paths.get(parentBuilder.toString());
+        } catch (java.nio.file.InvalidPathException e) {
+            host.errorln("Gig Maestro: could not construct device library search root '"
+                + parentBuilder + "': " + e.getMessage());
+            return results;
+        }
+        if (!Files.isDirectory(parent)) {
             return results;
         }
 
-        String globSegment = pattern.getName(wildcardIndex).toString();
-        Path suffix = wildcardIndex + 1 < pattern.getNameCount()
-            ? pattern.subpath(wildcardIndex + 1, pattern.getNameCount())
-            : null;
+        String globSegment = segments[wildcardIndex];
 
+        // Build the literal (wildcard-free) suffix that follows the wildcard segment.
+        StringBuilder suffixBuilder = new StringBuilder();
+        for (int i = wildcardIndex + 1; i < segments.length; i++) {
+            if (suffixBuilder.length() > 0) {
+                suffixBuilder.append(java.io.File.separatorChar);
+            }
+            suffixBuilder.append(segments[i]);
+        }
+        Path suffix = null;
+        if (suffixBuilder.length() > 0) {
+            try {
+                suffix = Paths.get(suffixBuilder.toString());
+            } catch (java.nio.file.InvalidPathException e) {
+                host.errorln("Gig Maestro: could not construct device library suffix '"
+                    + suffixBuilder + "': " + e.getMessage());
+                return results;
+            }
+        }
+
+        // The ONLY place the wildcard segment is used: as a glob pattern string handed to the
+        // directory-listing API, matched against real entry names it enumerates itself -- never
+        // parsed as a Path.
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(parent, globSegment)) {
             for (Path match : stream) {
                 Path candidate = suffix != null ? match.resolve(suffix) : match;
