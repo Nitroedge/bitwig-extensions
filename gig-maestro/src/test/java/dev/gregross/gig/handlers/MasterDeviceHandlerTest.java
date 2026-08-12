@@ -266,7 +266,7 @@ class MasterDeviceHandlerTest {
         when(mockDeviceLibrary.resolve("Reverb")).thenReturn(Path.of("/devices/Reverb.bwdevice"));
         when(mockMasterTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("masterDevice/insertBitwigDevice", "{\"name\":\"Reverb\"}"));
-        verify(mockInsertionPoint).insertFile("/devices/Reverb.bwdevice");
+        verify(mockInsertionPoint).insertFile(Path.of("/devices/Reverb.bwdevice").toString());
     }
 
     @Test
@@ -281,7 +281,7 @@ class MasterDeviceHandlerTest {
         when(mockDeviceLibrary.resolve("EQ-5")).thenReturn(Path.of("/devices/EQ-5.bwdevice"));
         when(mockCursorDevice.afterDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("masterDevice/insertBitwigDevice", "{\"name\":\"EQ-5\",\"position\":\"after\"}"));
-        verify(mockInsertionPoint).insertFile("/devices/EQ-5.bwdevice");
+        verify(mockInsertionPoint).insertFile(Path.of("/devices/EQ-5.bwdevice").toString());
     }
 
     // --- Behavioral tests (Mockito) — Chain navigation ---

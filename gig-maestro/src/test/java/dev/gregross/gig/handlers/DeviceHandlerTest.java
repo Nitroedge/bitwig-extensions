@@ -429,7 +429,7 @@ class DeviceHandlerTest {
         when(mockDeviceLibrary.resolve("E-Clap")).thenReturn(Path.of("/devices/E-Clap.bwdevice"));
         when(mockCursorTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("device/insertBitwigDevice", "{\"name\":\"E-Clap\"}"));
-        verify(mockInsertionPoint).insertFile("/devices/E-Clap.bwdevice");
+        verify(mockInsertionPoint).insertFile(Path.of("/devices/E-Clap.bwdevice").toString());
     }
 
     @Test
@@ -458,7 +458,7 @@ class DeviceHandlerTest {
         when(mockDeviceLibrary.resolve("Delay-2")).thenReturn(Path.of("/devices/Delay-2.bwdevice"));
         when(mockCursorDevice.beforeDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("device/insertBitwigDevice", "{\"name\":\"Delay-2\",\"position\":\"before\"}"));
-        verify(mockInsertionPoint).insertFile("/devices/Delay-2.bwdevice");
+        verify(mockInsertionPoint).insertFile(Path.of("/devices/Delay-2.bwdevice").toString());
     }
 
     // --- Behavioral tests (Mockito) — Chain navigation ---
