@@ -44,14 +44,14 @@ class StateCacheSnapshotTest {
         populateTrack(cache, 0);
         JsonObject tracks = cache.getSnapshot().getAsJsonObject("tracks");
 
-        assertEquals(8, tracks.get("bankSize").getAsInt());
+        assertEquals(trackCountOf(StateCache.class), tracks.get("bankSize").getAsInt());
         assertTrue(tracks.has("scrollPosition"));
         assertTrue(tracks.has("itemCount"));
         assertTrue(tracks.has("canScrollBackwards"));
         assertTrue(tracks.has("canScrollForwards"));
 
         JsonArray trackArr = tracks.getAsJsonArray("tracks");
-        assertEquals(8, trackArr.size());
+        assertEquals(trackCountOf(StateCache.class), trackArr.size());
 
         JsonObject track0 = trackArr.get(0).getAsJsonObject();
         assertEquals(0, track0.get("index").getAsInt());

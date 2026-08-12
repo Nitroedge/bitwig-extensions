@@ -7,6 +7,24 @@ import java.lang.reflect.Field;
  */
 class StateCacheTestHelper {
 
+    /**
+     * Reads a private static {@code TRACK_COUNT} from the given class.
+     *
+     * <p>Both {@link GigMaestroExtension} and {@link StateCache} declare their own
+     * {@code private static final int TRACK_COUNT}. Tests read the constant through
+     * this accessor rather than restating its value as a literal, so a future change
+     * to the ceiling cannot leave an assertion behind asserting the old number.
+     */
+    static int trackCountOf(Class<?> owner) {
+        try {
+            Field field = owner.getDeclaredField("TRACK_COUNT");
+            field.setAccessible(true);
+            return field.getInt(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read TRACK_COUNT from: " + owner.getName(), e);
+        }
+    }
+
     static void setField(StateCache cache, String fieldName, Object value) {
         try {
             Field field = StateCache.class.getDeclaredField(fieldName);
@@ -65,7 +83,7 @@ class StateCacheTestHelper {
         setArrayElement(cache, "trackMutes", index, false);
         setArrayElement(cache, "trackSolos", index, true);
         setArrayElement(cache, "trackArms", index, true);
-        // trackColors is float[8][3]
+        // trackColors is float[TRACK_COUNT][3]
         try {
             Field field = StateCache.class.getDeclaredField("trackColors");
             field.setAccessible(true);

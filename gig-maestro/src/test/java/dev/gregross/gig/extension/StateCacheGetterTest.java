@@ -135,7 +135,7 @@ class StateCacheGetterTest {
         JsonObject info = cache.getTrackBankScrollInfo();
         assertEquals(8, info.get("scrollPosition").getAsInt());
         assertEquals(32, info.get("itemCount").getAsInt());
-        assertEquals(8, info.get("bankSize").getAsInt());
+        assertEquals(trackCountOf(StateCache.class), info.get("bankSize").getAsInt());
     }
 
     @Test
