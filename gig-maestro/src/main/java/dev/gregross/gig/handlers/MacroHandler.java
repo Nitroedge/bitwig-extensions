@@ -11,6 +11,22 @@ public class MacroHandler {
 
     private static final long FLUSH_DELAY_MS = 100;
 
+    /**
+     * The scene bank window width, used by {@link #handleBuildSection} to convert an absolute
+     * scene index into a bank-relative slot index after scrolling.
+     *
+     * <p>This was a method-local {@code int bankSize = 5;} carrying the comment
+     * "matches SCENE_COUNT" -- a correspondence nothing enforced. It is deliberately NOT named
+     * {@code SCENE_COUNT}: this class is not a sixth declaration of the ceiling, it is a
+     * consumer of it, and giving it that name would make the five-way agreement test in
+     * {@code SceneCountConsistencyTest} read six values while its message still described five.
+     * The link back to the real ceiling is asserted by
+     * {@code sceneCount_inlineBankSizeLiteralMatchesTheConstant} in that same test class,
+     * source-level, because a method-local was invisible to reflection and this promotion is
+     * exactly what that assertion now guards against being undone.
+     */
+    private static final int SCENE_BANK_SIZE = 16;
+
     private final JsonRpcDispatcher dispatcher;
     private final StateCache stateCache;
     private final TaskScheduler scheduler;
@@ -195,7 +211,7 @@ public class MacroHandler {
             scrollParams.addProperty("amount", sceneCountBefore);
             dispatcher.handleInternal("sceneBank/scrollBy", scrollParams);
 
-            int bankSize = 5; // matches SCENE_COUNT
+            int bankSize = SCENE_BANK_SIZE;
             int totalScenes = sceneCountBefore + 1;
             int scrollPosition = Math.max(0, totalScenes - bankSize);
             slotIndex = (totalScenes - 1) - scrollPosition;
