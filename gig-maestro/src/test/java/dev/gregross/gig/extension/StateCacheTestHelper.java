@@ -5,7 +5,7 @@ import java.lang.reflect.Field;
 /**
  * Reflection utilities for injecting test data into StateCache's private fields.
  */
-class StateCacheTestHelper {
+public class StateCacheTestHelper {
 
     /**
      * Reads a private static {@code TRACK_COUNT} from the given class.
@@ -22,6 +22,32 @@ class StateCacheTestHelper {
             return field.getInt(null);
         } catch (Exception e) {
             throw new RuntimeException("Failed to read TRACK_COUNT from: " + owner.getName(), e);
+        }
+    }
+
+    /**
+     * Reads a private static {@code SCENE_COUNT} from the given class.
+     *
+     * <p>Five classes declare their own {@code private static final int SCENE_COUNT}:
+     * {@link GigMaestroExtension}, {@link StateCache}, and the {@code SceneHandler},
+     * {@code ClipHandler} and {@code TrackHandler} in {@code dev.gregross.gig.handlers}.
+     * {@code setAccessible(true)} is what makes the three handler declarations readable
+     * from a test in this package, so {@code SceneCountConsistencyTest} does not have to
+     * move or be split in two.
+     *
+     * <p>This one reader is {@code public} (unlike its siblings here) because the handler
+     * tests in {@code dev.gregross.gig.handlers} need it too: their out-of-range cases must
+     * derive the first invalid scene index from the constant rather than restate it, for the
+     * same reason {@code trackCountOf} exists. Restated literals are what made this change
+     * red in six places.
+     */
+    public static int sceneCountOf(Class<?> owner) {
+        try {
+            Field field = owner.getDeclaredField("SCENE_COUNT");
+            field.setAccessible(true);
+            return field.getInt(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read SCENE_COUNT from: " + owner.getName(), e);
         }
     }
 

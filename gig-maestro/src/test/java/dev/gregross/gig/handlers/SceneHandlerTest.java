@@ -16,6 +16,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import static dev.gregross.gig.extension.StateCacheTestHelper.sceneCountOf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -44,6 +45,20 @@ class SceneHandlerTest {
     }
 
     // --- Registration ---
+
+
+    /**
+     * The first scene index the handler must refuse: exactly one past the ceiling.
+     *
+     * <p>Derived from SceneHandler's own SCENE_COUNT rather than restated as a
+     * literal. A restated literal does not merely go stale when the ceiling moves --
+     * it silently stops testing anything, because the old out-of-range index becomes a
+     * perfectly valid one and the case then asserts an error that will never come.
+     * That is precisely how this file went red when the ceiling moved 5 -> 16.
+     */
+    private static int firstInvalidSceneIndex() {
+        return sceneCountOf(SceneHandler.class);
+    }
 
     @Test
     void registersFiveSceneMethods() {
@@ -94,7 +109,7 @@ class SceneHandlerTest {
 
     @Test
     void sceneDuplicate_indexTooHigh_returnsError() {
-        String response = dispatcher.handle(rpc("scene/duplicate", "{\"index\": 8}"));
+        String response = dispatcher.handle(rpc("scene/duplicate", "{\"index\": " + firstInvalidSceneIndex() + "}"));
         assertContains(response, "-32602");
     }
 
@@ -122,7 +137,7 @@ class SceneHandlerTest {
 
     @Test
     void sceneRename_indexTooHigh_returnsError() {
-        String response = dispatcher.handle(rpc("scene/rename", "{\"index\": 8, \"name\": \"Test\"}"));
+        String response = dispatcher.handle(rpc("scene/rename", "{\"index\": " + firstInvalidSceneIndex() + ", \"name\": \"Test\"}"));
         assertContains(response, "-32602");
     }
 
@@ -143,7 +158,7 @@ class SceneHandlerTest {
 
     @Test
     void sceneDelete_indexTooHigh_returnsError() {
-        String response = dispatcher.handle(rpc("scene/delete", "{\"index\": 8}"));
+        String response = dispatcher.handle(rpc("scene/delete", "{\"index\": " + firstInvalidSceneIndex() + "}"));
         assertContains(response, "-32602");
     }
 
@@ -175,7 +190,7 @@ class SceneHandlerTest {
 
     @Test
     void sceneLaunchAlt_indexTooHigh_returnsError() {
-        String response = dispatcher.handle(rpc("scene/launchAlt", "{\"index\": 8}"));
+        String response = dispatcher.handle(rpc("scene/launchAlt", "{\"index\": " + firstInvalidSceneIndex() + "}"));
         assertContains(response, "-32602");
     }
 

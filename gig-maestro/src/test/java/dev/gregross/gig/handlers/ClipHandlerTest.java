@@ -23,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import static dev.gregross.gig.extension.StateCacheTestHelper.sceneCountOf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -72,6 +73,20 @@ class ClipHandlerTest {
     }
 
     // --- Registration ---
+
+
+    /**
+     * The first scene index the handler must refuse: exactly one past the ceiling.
+     *
+     * <p>Derived from ClipHandler's own SCENE_COUNT rather than restated as a
+     * literal. A restated literal does not merely go stale when the ceiling moves --
+     * it silently stops testing anything, because the old out-of-range index becomes a
+     * perfectly valid one and the case then asserts an error that will never come.
+     * That is precisely how this file went red when the ceiling moved 5 -> 16.
+     */
+    private static int firstInvalidSceneIndex() {
+        return sceneCountOf(ClipHandler.class);
+    }
 
     @Test
     void registersAllClipMethods() {
@@ -282,7 +297,7 @@ class ClipHandlerTest {
 
     @Test
     void sceneLaunch_indexOutOfRange_returnsError() {
-        String response = dispatcher.handle(rpc("scene/launch", "{\"index\": 5}"));
+        String response = dispatcher.handle(rpc("scene/launch", "{\"index\": " + firstInvalidSceneIndex() + "}"));
         assertContains(response, "-32602");
         assertContains(response, "out of range");
     }

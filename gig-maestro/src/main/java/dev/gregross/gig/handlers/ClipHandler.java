@@ -18,7 +18,7 @@ import dev.gregross.gig.rpc.JsonRpcDispatcher;
 
 public class ClipHandler {
 
-    private static final int SCENE_COUNT = 5;
+    private static final int SCENE_COUNT = 16;
     private static final Set<String> LAUNCH_QUANTIZATIONS = Set.of(
         "default", "none", "8", "4", "2", "1", "1/2", "1/4", "1/8", "1/16"
     );

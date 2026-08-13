@@ -122,7 +122,7 @@ class StateCacheGetterTest {
         JsonObject info = cache.getSceneBankScrollInfo();
         assertEquals(5, info.get("scrollPosition").getAsInt());
         assertEquals(20, info.get("itemCount").getAsInt());
-        assertEquals(5, info.get("bankSize").getAsInt());
+        assertEquals(sceneCountOf(StateCache.class), info.get("bankSize").getAsInt());
         assertTrue(info.get("canScrollBackwards").getAsBoolean());
         assertTrue(info.get("canScrollForwards").getAsBoolean());
     }

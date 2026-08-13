@@ -17,7 +17,7 @@ import dev.gregross.gig.rpc.RpcException;
 public class TrackHandler {
 
     private static final int SEND_COUNT = 4;
-    private static final int SCENE_COUNT = 5;
+    private static final int SCENE_COUNT = 16;
 
     private final TrackBank trackBank;
     private final Application application;

@@ -13,7 +13,7 @@ import dev.gregross.gig.rpc.RpcException;
 
 public class SceneHandler {
 
-    private static final int SCENE_COUNT = 5;
+    private static final int SCENE_COUNT = 16;
 
     private final SceneBank sceneBank;
     private final Project project;

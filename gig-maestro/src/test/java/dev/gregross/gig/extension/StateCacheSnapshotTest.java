@@ -79,7 +79,7 @@ class StateCacheSnapshotTest {
         assertTrue(track0.has("sends"));
         assertTrue(track0.has("clips"));
         assertEquals(4, track0.getAsJsonArray("sends").size());
-        assertEquals(5, track0.getAsJsonArray("clips").size());
+        assertEquals(sceneCountOf(StateCache.class), track0.getAsJsonArray("clips").size());
     }
 
     @Test
@@ -88,11 +88,11 @@ class StateCacheSnapshotTest {
         setField(cache, "sceneItemCount", 10);
         JsonObject scenes = cache.getSnapshot().getAsJsonObject("scenes");
 
-        assertEquals(5, scenes.get("bankSize").getAsInt());
+        assertEquals(sceneCountOf(StateCache.class), scenes.get("bankSize").getAsInt());
         assertEquals(10, scenes.get("itemCount").getAsInt());
 
         JsonArray sceneArr = scenes.getAsJsonArray("scenes");
-        assertEquals(5, sceneArr.size());
+        assertEquals(sceneCountOf(StateCache.class), sceneArr.size());
 
         JsonObject scene0 = sceneArr.get(0).getAsJsonObject();
         assertEquals(0, scene0.get("index").getAsInt());

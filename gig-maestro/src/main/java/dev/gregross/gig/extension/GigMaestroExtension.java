@@ -45,7 +45,7 @@ public class GigMaestroExtension extends ControllerExtension {
     private static final int DEFAULT_PORT = 8787;
     private static final int TRACK_COUNT = 16;
     private static final int SEND_COUNT = 4;
-    private static final int SCENE_COUNT = 5;
+    private static final int SCENE_COUNT = 16;
     private static final int CLIP_GRID_WIDTH = 256;
     private static final int CLIP_GRID_HEIGHT = 128;
 

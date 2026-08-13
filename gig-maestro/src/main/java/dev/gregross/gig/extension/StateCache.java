@@ -21,7 +21,7 @@ import java.util.List;
 public class StateCache {
 
     private static final int TRACK_COUNT = 16;
-    private static final int SCENE_COUNT = 5;
+    private static final int SCENE_COUNT = 16;
     private static final int DEFAULT_SEND_COUNT = 4;
 
     // Transport state

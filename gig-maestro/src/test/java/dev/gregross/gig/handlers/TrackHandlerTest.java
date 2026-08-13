@@ -23,6 +23,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import static dev.gregross.gig.extension.StateCacheTestHelper.sceneCountOf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -362,7 +363,7 @@ class TrackHandlerTest {
     void createGroup_callsCursorTrackCreateParentTrack() {
         dispatcher.handle(rpc("track/createGroup", "{}"));
 
-        verify(mockCursorTrack).createParentTrack(4, 5);
+        verify(mockCursorTrack).createParentTrack(4, sceneCountOf(TrackHandler.class));
     }
 
     @Test
