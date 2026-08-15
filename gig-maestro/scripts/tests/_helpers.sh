@@ -66,10 +66,31 @@ assert_skip() {
   echo "  SKIP  $label — $reason"
 }
 
+# The interpreter snapshot_field runs on. Resolved rather than hardcoded: the project's
+# prescribed Windows environment ships `python` and NOT `python3` (the Python.org installer
+# creates python.exe/pythonw.exe only; `python3` exists on POSIX and inside a Windows Store
+# install, neither of which is what the validation machine has). A hardcoded `python3` made
+# every snapshot_field call emit nothing to stdout and a not-found message to stderr, so the
+# assertion that consumed it compared an empty string and failed for a reason that had nothing
+# to do with the engine.
+if [ -z "${PYTHON_BIN:-}" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    PYTHON_BIN=""
+  fi
+fi
+
 snapshot_field() {
   local path="$1"
+  if [ -z "$PYTHON_BIN" ]; then
+    echo "PYTHON_NOT_FOUND"
+    return 0
+  fi
   rpc '{"jsonrpc":"2.0","method":"session/snapshot","id":99}' | \
-    python3 -c "import sys,json; print(json.load(sys.stdin)['result']${path})"
+    "$PYTHON_BIN" -c "import sys,json; print(json.load(sys.stdin)['result']${path})"
 }
 
 # --- summary ---

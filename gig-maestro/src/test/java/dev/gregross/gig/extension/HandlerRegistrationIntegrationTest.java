@@ -42,6 +42,7 @@ class HandlerRegistrationIntegrationTest {
     @Mock private DrumPadBank mockDrumPadBank;
     @Mock private MasterTrack mockMasterTrack;
     @Mock private Clip mockCursorClip;
+    @Mock private Clip mockArrangerClip;
     @Mock private Project mockProject;
     @Mock private NoteInput mockNoteInput;
     @Mock private Arpeggiator mockArpeggiator;
@@ -86,7 +87,12 @@ class HandlerRegistrationIntegrationTest {
             return methods;
         });
 
-        // Register all 16 handlers in the same order as GigMaestroExtension.init()
+        // Register every handler in the same order as GigMaestroExtension.init(). This mirror is
+        // load-bearing: when ArrangerClipHandler was added to init() and not to this list, the
+        // only count assertion below was a loose `> 200` and nothing failed and nothing was
+        // reported (deferred item D6-DEF-01). The per-namespace tests further down are what turn
+        // a future omission into a red test instead of a silent one, so a handler added to init()
+        // must gain a line here AND a namespace test.
         DeviceLibrary deviceLibrary = new DeviceLibrary(tempDir);
 
         new ApplicationHandler(mockApplication, mockHost, mockTrackBank).register(dispatcher);
@@ -97,6 +103,7 @@ class HandlerRegistrationIntegrationTest {
         new ClipHandler(mockTrackBank, mockSceneBank, mockCursorClip, stateCache).register(dispatcher);
         new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage, mockDrumPadBank, deviceLibrary, mockTransport, mockHost, (task, delay) -> task.run()).register(dispatcher);
         new NoteHandler(mockCursorClip, stateCache).register(dispatcher);
+        new ArrangerClipHandler(mockArrangerClip, stateCache).register(dispatcher);
         new SceneHandler(mockSceneBank, mockProject, stateCache).register(dispatcher);
         new ArrangerHandler(mockArranger, mockTransport, mockCueMarkerBank, mockScrollbar, stateCache).register(dispatcher);
         new MasterDeviceHandler(mockMasterTrack, mockMasterCursorDevice, mockMasterRemoteControlsPage, deviceLibrary, (task, delay) -> task.run()).register(dispatcher);
@@ -114,8 +121,12 @@ class HandlerRegistrationIntegrationTest {
     @Test
     void allHandlersRegisterSuccessfully() {
         Set<String> methods = dispatcher.getRegisteredMethods();
-        // 16 handlers + 2 built-in (session/snapshot, api/list)
-        // Exact count verified by running the test
+        // A floor, not a mirror — deliberately kept loose, because a handler-by-handler exact
+        // count restated here would go stale on every new RPC method and would be re-typed
+        // rather than re-derived. What actually catches an omission is a namespace test below: a
+        // handler missing from setUp() loses its whole prefix and fails there. Note that the
+        // namespace tests do not yet cover every handler — a handler whose prefix has no test is
+        // a handler this class can still lose silently.
         assertTrue(methods.size() > 200, "Expected 200+ methods, got " + methods.size());
     }
 
@@ -148,6 +159,16 @@ class HandlerRegistrationIntegrationTest {
     @Test
     void clipNamespaceRegistered() {
         assertNamespacePresent("clip/");
+    }
+
+    /**
+     * The test that would have failed when {@code ArrangerClipHandler} was added to
+     * {@code init()} and not to this class's {@code setUp()} (D6-DEF-01). The `clip/` test above
+     * does not cover it: `arrangerClip/` is a separate namespace on a separate Clip object.
+     */
+    @Test
+    void arrangerClipNamespaceRegistered() {
+        assertNamespacePresent("arrangerClip/");
     }
 
     @Test

@@ -10,6 +10,17 @@
 #   ./scripts/smoke-test.sh --list         — list available test scripts
 #   ./scripts/smoke-test.sh --port PORT    — use a custom port (default: 8787)
 #
+# Test scripts are DISCOVERED from scripts/tests/ rather than listed here: anything matching
+# offline-*.sh is offline, anything else that does not start with _ is online. Dropping a file
+# in that directory registers it, which is why --list is the authority on what exists and no
+# name is restated below.
+#
+# Scripts that need session state beyond "Bitwig is running", and what they need:
+#
+#   arranger-clip — an arranger clip selected BY HAND in the Bitwig timeline. Its content
+#                   assertions SKIP with the reason named when nothing is selected, rather
+#                   than FAILing about the session instead of about the engine.
+#
 
 set -euo pipefail
 

@@ -54,7 +54,9 @@ Every phase MUST include all three testing layers during governance:
 - `gig-maestro/scripts/smoke-test.sh --list` — list available test scripts
 - Test scripts live in `gig-maestro/scripts/tests/`, each sourcing `_helpers.sh`
 - Offline scripts: `offline-schemas.sh` (data-driven), `offline-builds.sh`
-- Online scripts: `transport`, `tracks`, `clips`, `notes`, `devices`, `arranger`, `mixer`, `browser`, `project`, `clip-launcher`, `health`, `errors`
+- Online scripts: `transport`, `tracks`, `clips`, `notes`, `devices`, `arranger`, `arranger-clip`, `mixer`, `browser`, `project`, `clip-launcher`, `health`, `errors`
+  - `arranger` is arranger VIEW control; `arranger-clip` is arranger CLIP CONTENT (the `arrangerClip/*` namespace) and needs a clip selected by hand in the timeline
+  - `smoke-test.sh --list` is the authority on what exists — the runner discovers scripts from the directory, so this line is documentation and can go stale; check it against `--list` before trusting it
 - **Must be updated** when new RPC methods or tools are added in a phase
 - Run during governance to catch integration issues
 
