@@ -13,6 +13,7 @@ import com.bitwig.extension.callback.StringArrayValueChangedCallback;
 import com.bitwig.extension.callback.StringValueChangedCallback;
 import com.bitwig.extension.controller.api.*;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
@@ -166,6 +167,34 @@ public class StateCache {
     private volatile boolean clipLoopEnabled;
     private volatile double clipLoopStart;
     private final float[] clipColor = new float[3];
+
+    // Arranger cursor clip state (D-06). Deliberately NOT a copy of the launcher block above:
+    //
+    //  * `exists` is FIRST and is the load-bearing field. It is the only member of the interface
+    //    that can distinguish "nothing is selected in the arranger" from "the selected clip is
+    //    empty", which is what D-02's refusal contract rests on.
+    //  * There is NO `hasContent` twin. The launcher's `clipHasNotes` is a write-once latch --
+    //    the step-data observer sets it true and nothing anywhere sets it false -- so a parallel
+    //    field would answer true forever and would be useless as a discriminator. `exists()` plus
+    //    the note count from arrangerClip/getNotes answers emptiness on this surface instead.
+    //  * Every field below is a BOXED type left null until its observer fires, not a primitive
+    //    sitting at 0.0 / "" / false. An observer that has not fired must stay distinguishable
+    //    from one that fired with a zero value: `loopStart == 0.0` is a real clip starting at the
+    //    first bar, so recording "nobody has read this yet" as 0.0 would be precisely the
+    //    absent-field-as-zero failure this surface exists to avoid. `playingStep` is the one
+    //    exception and carries the launcher's own declared unset sentinel, -1.
+    //  * There is no observable step size: the API publishes two setStepSize setters and no
+    //    getter, so this holds the last value written through arrangerClip/setStepSize and stays
+    //    null until something writes one.
+    private volatile Boolean arrangerClipExists;
+    private volatile String arrangerClipTrackName;
+    private volatile int arrangerClipPlayingStep = -1;
+    private volatile Double arrangerClipLoopStart;
+    private volatile Double arrangerClipLoopLength;
+    private volatile Double arrangerClipPlayStart;
+    private volatile Double arrangerClipPlayStop;
+    private volatile Double arrangerClipStepSize;
+    private volatile float[] arrangerClipColor;
 
     // Application state
     private volatile String projectName = "";
@@ -690,6 +719,57 @@ public class StateCache {
         });
     }
 
+    /**
+     * Arranger cursor clip observers (D-06).
+     *
+     * <p>Takes ONE parameter, deliberately, unlike
+     * {@link #registerClipCursorObservers(Clip, CursorTrack)}. The arranger cursor clip is
+     * created from the ControllerHost -- by the arranger cursor-clip factory called once in
+     * {@code GigMaestroExtension.init()} -- and not from a track, so it does not follow the
+     * cursor track and there is no CursorTrack to take a name
+     * from. The track name comes from {@code Clip.getTrack()} instead, which is also the closest
+     * thing to a clip name this surface has: at API v25 the Clip interface's only name member is
+     * {@code void setName(String)}, and the launcher's clip names come from the slot bank, which
+     * an arranger clip has no equivalent of.
+     */
+    public void registerArrangerClipCursorObservers(Clip arrangerClip) {
+        // Exists first, and it is the load-bearing one: it is what separates "nothing is selected
+        // in the arranger" from "the selected clip is empty".
+        arrangerClip.exists().markInterested();
+        arrangerClip.exists().addValueObserver((BooleanValueChangedCallback) v -> arrangerClipExists = v);
+
+        // The containing track's name -- what the user can confirm against the Bitwig window.
+        Track arrangerClipTrack = arrangerClip.getTrack();
+        arrangerClipTrack.name().markInterested();
+        arrangerClipTrack.name().addValueObserver((StringValueChangedCallback) v -> arrangerClipTrackName = (String) v);
+
+        // Loop/play boundaries
+        arrangerClip.getLoopStart().markInterested();
+        arrangerClip.getLoopStart().addValueObserver((DoubleValueChangedCallback) v -> arrangerClipLoopStart = v);
+
+        arrangerClip.getLoopLength().markInterested();
+        arrangerClip.getLoopLength().addValueObserver((DoubleValueChangedCallback) v -> arrangerClipLoopLength = v);
+
+        arrangerClip.getPlayStart().markInterested();
+        arrangerClip.getPlayStart().addValueObserver((DoubleValueChangedCallback) v -> arrangerClipPlayStart = v);
+
+        arrangerClip.getPlayStop().markInterested();
+        arrangerClip.getPlayStop().addValueObserver((DoubleValueChangedCallback) v -> arrangerClipPlayStop = v);
+
+        // Playing step -- the modern IntegerValue form, not the deprecated addPlayingStepObserver.
+        arrangerClip.playingStep().markInterested();
+        arrangerClip.playingStep().addValueObserver((IntegerValueChangedCallback) v -> arrangerClipPlayingStep = v);
+
+        // Clip color -- the modern SettableColorValue form, not the deprecated addColorObserver.
+        // The array is replaced rather than mutated in place so that "no observer has fired yet"
+        // stays representable as null instead of collapsing into an indistinguishable black.
+        arrangerClip.color().markInterested();
+        arrangerClip.color().addValueObserver((ColorValueChangedCallback) (r, g, b) ->
+            arrangerClipColor = new float[] {r, g, b});
+
+        // NO step-data observer here, and no hasContent field. See the field block above.
+    }
+
     public void registerArrangerObservers(Arranger arranger) {
         arranger.isPlaybackFollowEnabled().markInterested();
         arranger.isPlaybackFollowEnabled().addValueObserver((BooleanValueChangedCallback) v -> arrangerPlaybackFollow = v);
@@ -1135,6 +1215,19 @@ public class StateCache {
         this.clipStepSize = stepSize;
     }
 
+    /**
+     * The last step size written through {@code arrangerClip/setStepSize}, or null if nothing has
+     * written one. Null rather than a plausible default because the API publishes no getter for
+     * this value: a default here would be a number nobody read presented as one somebody did.
+     */
+    public Double getArrangerClipStepSize() {
+        return arrangerClipStepSize;
+    }
+
+    public void setArrangerClipStepSize(double stepSize) {
+        this.arrangerClipStepSize = stepSize;
+    }
+
     public JsonObject getClipLaunchSettings() {
         JsonObject obj = new JsonObject();
         obj.addProperty("launchQuantization", clipLaunchQuantization);
@@ -1191,6 +1284,11 @@ public class StateCache {
         snapshot.add("scenes", getScenesState());
         snapshot.add("device", getDeviceState());
         snapshot.add("clip", getClipState());
+        // The second Clip object (D-05): `clip` above means the LAUNCHER cursor clip, this one is
+        // the arranger cursor clip. Snapshot only, deliberately -- it is not added to getDelta()
+        // because WsRpcServer.VALID_TOPICS is the published subscribe vocabulary and adding an
+        // unsubscribable section name to the delta would emit a topic no client can ask for.
+        snapshot.add("arrangerClip", getArrangerClipState());
         snapshot.add("master", getMasterState());
         snapshot.add("application", getApplicationState());
         snapshot.add("arranger", getArrangerState());
@@ -1556,6 +1654,38 @@ public class StateCache {
         color.addProperty("g", clipColor[1]);
         color.addProperty("b", clipColor[2]);
         obj.add("color", color);
+        return obj;
+    }
+
+    /**
+     * The arranger cursor clip's snapshot section. Public because
+     * {@code arrangerClip/getState} delegates straight to it.
+     *
+     * <p>A null value anywhere in this object means "no observer has reported this yet", never
+     * zero and never the empty string. That distinction is the whole point of the section: on
+     * this surface a boundary of 0.0 is a real clip at the first bar, so a field defaulted to
+     * 0.0 would be indistinguishable from one nobody has read.
+     */
+    public JsonObject getArrangerClipState() {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("exists", arrangerClipExists);
+        obj.addProperty("trackName", arrangerClipTrackName);
+        obj.addProperty("playingStep", arrangerClipPlayingStep);
+        obj.addProperty("loopStart", arrangerClipLoopStart);
+        obj.addProperty("loopLength", arrangerClipLoopLength);
+        obj.addProperty("playStart", arrangerClipPlayStart);
+        obj.addProperty("playStop", arrangerClipPlayStop);
+        obj.addProperty("stepSize", arrangerClipStepSize);
+        float[] rgb = arrangerClipColor;
+        if (rgb == null) {
+            obj.add("color", JsonNull.INSTANCE);
+        } else {
+            JsonObject color = new JsonObject();
+            color.addProperty("r", rgb[0]);
+            color.addProperty("g", rgb[1]);
+            color.addProperty("b", rgb[2]);
+            obj.add("color", color);
+        }
         return obj;
     }
 

@@ -6,6 +6,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import dev.gregross.gig.handlers.ApplicationHandler;
+import dev.gregross.gig.handlers.ArrangerClipHandler;
 import dev.gregross.gig.handlers.ArrangerHandler;
 import dev.gregross.gig.handlers.BrowserHandler;
 import dev.gregross.gig.handlers.ClipHandler;
@@ -46,8 +47,13 @@ public class GigMaestroExtension extends ControllerExtension {
     private static final int TRACK_COUNT = 16;
     private static final int SEND_COUNT = 4;
     private static final int SCENE_COUNT = 16;
-    private static final int CLIP_GRID_WIDTH = 256;
-    private static final int CLIP_GRID_HEIGHT = 128;
+    // Public because both cursor clips are created with these dimensions and the handlers that
+    // walk either grid must bound their walk by the same numbers. Promoted rather than
+    // re-declared: a third declaration of 256/128 would be a new cross-declaration constant
+    // needing its own consistency test to stay honest. As compile-time constants these are
+    // inlined by javac, so referencing them adds no runtime dependency on this class.
+    public static final int CLIP_GRID_WIDTH = 256;
+    public static final int CLIP_GRID_HEIGHT = 128;
 
     // Device library resolution (upstream issue #1). Resolution order: explicit configuration
     // (Bitwig Settings -> Controllers -> Gig Maestro) -> runtime discovery of a real Bitwig
@@ -102,6 +108,16 @@ public class GigMaestroExtension extends ControllerExtension {
         Clip cursorClip = cursorTrack.createLauncherCursorClip("gig-clip", "Gig Clip",
             CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
 
+        // Create cursor clip for ARRANGER timeline note editing. The factory called below is
+        // declared on ControllerHost, NOT on Track, and has no Track overload -- so the launcher
+        // line above cannot simply be copied with a different method name, and this is the ONE
+        // call site of it in the tree. Consequences carried rather than discovered: it returns a
+        // bare Clip, so
+        // it has no isPinned() and no CursorClip.selectClip(Clip) (cursor/setPinned cannot apply
+        // to it), and it does not follow cursorTrack -- which is why its observer registration
+        // below takes one argument where the launcher's takes two.
+        Clip arrangerClip = host.createArrangerCursorClip(CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
+
         // Create project reference
         Project project = host.getProject();
 
@@ -137,6 +153,7 @@ public class GigMaestroExtension extends ControllerExtension {
         stateCache.registerClipObservers(trackBank);
         stateCache.registerDeviceObservers(cursorTrack, cursorDevice, remoteControlsPage);
         stateCache.registerClipCursorObservers(cursorClip, cursorTrack);
+        stateCache.registerArrangerClipCursorObservers(arrangerClip);
         stateCache.registerArrangerObservers(arranger);
         stateCache.registerArrangementObservers(transport, cueMarkerBank);
         stateCache.registerSendObservers(trackBank, SEND_COUNT);
@@ -179,6 +196,7 @@ public class GigMaestroExtension extends ControllerExtension {
         DeviceLibrary deviceLibrary = resolveDeviceLibrary();
         new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary, transport, host, host::scheduleTask).register(dispatcher);
         new NoteHandler(cursorClip, stateCache).register(dispatcher);
+        new ArrangerClipHandler(arrangerClip, stateCache).register(dispatcher);
         new SceneHandler(trackBank.sceneBank(), project, stateCache).register(dispatcher);
         new ArrangerHandler(arranger, transport, cueMarkerBank, arranger.getHorizontalScrollbarModel(), stateCache).register(dispatcher);
         new MasterDeviceHandler(masterTrack, masterCursorDevice, masterRemoteControlsPage, deviceLibrary, host::scheduleTask).register(dispatcher);
