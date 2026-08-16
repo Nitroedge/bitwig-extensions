@@ -7,8 +7,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -17,9 +19,19 @@ class WsRpcServerTest {
     private static final int TEST_PORT = 19788;
     private WsRpcServer server;
 
+    /**
+     * Counts every requestHandler invocation. The Origin gap is specifically that the handler is
+     * REACHABLE from a browser-originated connection, so the proof of the refusal has to be that
+     * the handler was never reached — a closed connection or a status code proves nothing about
+     * what ran before it closed. Reset per test by @BeforeEach.
+     */
+    private AtomicInteger handlerCalls;
+
     @BeforeEach
     void setUp() throws Exception {
+        handlerCalls = new AtomicInteger();
         server = new WsRpcServer(TEST_PORT, body -> {
+            handlerCalls.incrementAndGet();
             if (body.contains("\"echo\"")) {
                 return CompletableFuture.completedFuture(
                     "{\"jsonrpc\":\"2.0\",\"result\":\"pong\",\"id\":1}");
@@ -28,6 +40,19 @@ class WsRpcServerTest {
         });
         server.start();
         Thread.sleep(200); // let server bind
+    }
+
+    /** A client whose handshake carries the given Origin, or none when {@code origin} is null. */
+    private WebSocketClient clientWithOrigin(String origin, CompletableFuture<String> received) {
+        Map<String, String> headers = origin == null ? Map.of() : Map.of("Origin", origin);
+        return new WebSocketClient(URI.create("ws://localhost:" + TEST_PORT), headers) {
+            @Override public void onOpen(ServerHandshake handshake) {}
+            @Override public void onMessage(String message) {
+                if (received != null) received.complete(message);
+            }
+            @Override public void onClose(int code, String reason, boolean remote) {}
+            @Override public void onError(Exception ex) {}
+        };
     }
 
     @AfterEach
@@ -43,6 +68,79 @@ class WsRpcServerTest {
         assertTrue(server.getAddress().getAddress().isLoopbackAddress(),
             "WebSocket RPC listener must bind loopback, not the wildcard address; bound to "
                 + server.getAddress());
+    }
+
+    // --- Origin refusal on the handshake (Gap 6) ---
+
+    @Test
+    void refusesAWebSocketHandshakeCarryingAForeignOrigin() throws Exception {
+        WebSocketClient client = clientWithOrigin("https://evil.example", null);
+
+        boolean opened = client.connectBlocking(2, TimeUnit.SECONDS);
+        assertFalse(opened,
+            "a handshake carrying a foreign Origin must be refused before the connection opens");
+
+        try {
+            client.send("{\"jsonrpc\":\"2.0\",\"method\":\"echo\",\"id\":1}");
+        } catch (Exception expected) {
+            // There is no open connection to send on — that is the refusal working.
+        }
+        Thread.sleep(300);
+
+        assertEquals(0, handlerCalls.get(),
+            "requestHandler must never be invoked on a foreign-Origin connection");
+        assertEquals(0, server.getClientCount(),
+            "a refused handshake must never reach onOpen, so no client is registered");
+    }
+
+    @Test
+    void acceptsAHandshakeCarryingNoOriginBecauseNoInProjectClientSendsOne() throws Exception {
+        CompletableFuture<String> received = new CompletableFuture<>();
+        WebSocketClient client = clientWithOrigin(null, received);
+
+        assertTrue(client.connectBlocking(2, TimeUnit.SECONDS),
+            "absence is acceptance: every in-project client sends no Origin at all");
+        client.send("{\"jsonrpc\":\"2.0\",\"method\":\"echo\",\"id\":1}");
+
+        assertTrue(received.get(2, TimeUnit.SECONDS).contains("\"pong\""));
+        assertEquals(1, handlerCalls.get(),
+            "a no-Origin client must reach the handler exactly as before");
+        client.closeBlocking();
+    }
+
+    @Test
+    void acceptsAHandshakeCarryingALoopbackOrigin() throws Exception {
+        CompletableFuture<String> received = new CompletableFuture<>();
+        WebSocketClient client = clientWithOrigin("http://127.0.0.1:8787", received);
+
+        assertTrue(client.connectBlocking(2, TimeUnit.SECONDS),
+            "an allow-listed loopback origin must connect");
+        client.send("{\"jsonrpc\":\"2.0\",\"method\":\"echo\",\"id\":1}");
+
+        assertTrue(received.get(2, TimeUnit.SECONDS).contains("\"pong\""));
+        assertEquals(1, handlerCalls.get());
+        client.closeBlocking();
+    }
+
+    @Test
+    void aForeignOriginCannotReachTheSubscriptionPathEither() throws Exception {
+        // onMessage takes TWO paths: handleSubscriptionRpc first, then requestHandler. A refusal
+        // that only guarded the second would leave state/subscribe wide open.
+        WebSocketClient client = clientWithOrigin("https://evil.example", null);
+
+        client.connectBlocking(2, TimeUnit.SECONDS);
+        try {
+            client.send("{\"jsonrpc\":\"2.0\",\"method\":\"state/subscribe\","
+                + "\"params\":{\"topics\":[\"transport\"]},\"id\":1}");
+        } catch (Exception expected) {
+            // No open connection to send on.
+        }
+        Thread.sleep(300);
+
+        assertEquals(0, server.getClientCount(),
+            "no connection was registered, so the subscription map — which is keyed by "
+                + "connections that only exist after onOpen — cannot have been touched");
+        assertEquals(0, handlerCalls.get());
     }
 
     @Test

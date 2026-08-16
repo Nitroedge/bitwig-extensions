@@ -5,7 +5,11 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.java_websocket.WebSocket;
+import org.java_websocket.drafts.Draft;
+import org.java_websocket.exceptions.InvalidDataException;
+import org.java_websocket.framing.CloseFrame;
 import org.java_websocket.handshake.ClientHandshake;
+import org.java_websocket.handshake.ServerHandshakeBuilder;
 import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetAddress;
@@ -27,6 +31,24 @@ public class WsRpcServer extends WebSocketServer {
         "browser", "arpeggiator", "noteLatch", "groove"
     );
 
+    /**
+     * The loopback authorities this extension itself serves from. A handshake carrying an
+     * {@code Origin} header whose value is not in this set is refused before the connection opens.
+     *
+     * Deliberately NOT configurable and NOT read from an environment variable: a configurable
+     * allow-list on an unauthenticated surface is a new way to open it.
+     *
+     * Package-private rather than private so a test can pin it against
+     * {@link HttpRpcServer#ALLOWED_ORIGINS}. The two listeners declare the set separately because
+     * they share no base class and coupling one to the other's constant would point the
+     * dependency the wrong way; a test is what stops the two copies drifting apart.
+     */
+    static final Set<String> ALLOWED_ORIGINS = Set.of(
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+        "http://[::1]:8787"
+    );
+
     private final Function<String, CompletableFuture<String>> requestHandler;
     private final Set<WebSocket> clients = new CopyOnWriteArraySet<>();
     private final Map<WebSocket, Set<String>> subscriptions = new ConcurrentHashMap<>();
@@ -39,6 +61,40 @@ public class WsRpcServer extends WebSocketServer {
         super(new InetSocketAddress(InetAddress.getLoopbackAddress(), port));
         this.requestHandler = requestHandler;
         setReuseAddr(true);
+    }
+
+    /**
+     * Refuse a browser-originated handshake BEFORE the connection opens.
+     *
+     * WebSockets are exempt from BOTH the same-origin policy and CORS, so neither the loopback
+     * bind above nor the absent Access-Control-Allow-Origin grant on the HTTP listener does
+     * anything here: any page the user happens to be visiting could open a driving connection to
+     * this port and reach all 324 RPC methods bidirectionally, arrangerClip/clearAllNotes
+     * included. Refusing at the handshake — rather than closing inside onOpen — means the
+     * connection never opens at all: onOpen is not called, the socket never enters `clients`, and
+     * NEITHER onMessage NOR handleSubscriptionRpc is reachable on it. Closing inside onOpen would
+     * leave a window in which state/subscribe was already accepted.
+     *
+     * ABSENCE IS ACCEPTANCE. A handshake carrying no Origin header at all is allowed through. No
+     * in-project client sends one — not the Python httpx client, not the CLI, not the smoke
+     * scripts — and refusing absence would break every consumer this server has. The asymmetry is
+     * safe because a browser is the only thing that attaches Origin unbidden, so refusing a
+     * present-and-unlisted value refuses exactly the class of caller the threat is about.
+     *
+     * What this does NOT do: it authenticates nobody. A non-browser client on the loopback
+     * interface is still fully trusted with the entire RPC surface. That is the posture
+     * PROJECT.md states for v1 and this check does not alter it — it refuses a channel class,
+     * not an identity.
+     */
+    @Override
+    public ServerHandshakeBuilder onWebsocketHandshakeReceivedAsServer(
+        WebSocket conn, Draft draft, ClientHandshake request) throws InvalidDataException {
+        String origin = request.getFieldValue("Origin");
+        if (origin != null && !origin.isEmpty() && !ALLOWED_ORIGINS.contains(origin)) {
+            throw new InvalidDataException(CloseFrame.POLICY_VALIDATION,
+                "Origin not allowed: " + origin);
+        }
+        return super.onWebsocketHandshakeReceivedAsServer(conn, draft, request);
     }
 
     @Override
