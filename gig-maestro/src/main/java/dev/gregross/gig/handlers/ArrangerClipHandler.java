@@ -110,32 +110,54 @@ public class ArrangerClipHandler {
             // launcher's clip/setStepSize never writes the cache, so its "restore" always
             // restores the cache's 0.25 default rather than whatever the caller was using
             // (finding O-12). arrangerClip/setStepSize does write the cache, so the value
-            // restored here is genuinely the last one written through this namespace. When
-            // nothing has ever been written, the cache holds null and there is no prior value
-            // to restore -- the widened size is then kept, and said so, rather than a default
-            // being invented and presented as a restoration.
+            // restored here is genuinely the last one written through this namespace.
+            //
+            // When nothing has ever been written the cache holds null and there is NO prior
+            // value to restore. The two paths are split below rather than folded through one
+            // `restored` local, because folding them made the null path write WIDE_STEP_SIZE
+            // into the cache -- and getState publishes that cache, so a resolution nobody chose
+            // started being reported as one somebody set. Three facts about the null path:
+            //
+            //   * THE WIDENED SIZE IS LEFT ON THE BITWIG CLIP, and the reply's stepSize says so,
+            //     because the widen genuinely happened and hiding it would be a second invention
+            //     in the other direction.
+            //   * THE ENGINE'S CACHE IS DELIBERATELY NOT WRITTEN, because nothing chose that
+            //     value. An engine acknowledgement is not a read-back of Bitwig -- the API
+            //     publishes no step-size getter at all -- so a value nobody set must be ABSENT
+            //     rather than invented.
+            //   * GETSTATE THEREFORE CONTINUES TO OMIT `stepSize`. JsonRpcDispatcher constructs
+            //     a bare `new Gson()` with no serializeNulls(), so a null member is dropped from
+            //     the payload rather than serialised as null. That absence is what lets a caller
+            //     tell "nobody set a grid" apart from "somebody set 4.0".
+            //
+            // On this path the reply and the cache say different things, on purpose: the reply
+            // describes a dispatch, the cache describes what somebody chose.
             Double savedStepSize = stateCache.getArrangerClipStepSize();
 
             arrangerClip.setStepSize(WIDE_STEP_SIZE);
             arrangerClip.scrollToStep(0);
             arrangerClip.clearSteps();
 
-            double restored = savedStepSize != null ? savedStepSize : WIDE_STEP_SIZE;
-            arrangerClip.setStepSize(restored);
-            arrangerClip.scrollToStep(0);
-            stateCache.setArrangerClipStepSize(restored);
+            if (savedStepSize != null) {
+                double restored = savedStepSize;
+                arrangerClip.setStepSize(restored);
+                arrangerClip.scrollToStep(0);
+                stateCache.setArrangerClipStepSize(restored);
 
-            // Confirm the restore against the cache rather than assuming the write took. This
-            // is a read-back of the engine's own record -- the API publishes no step-size
-            // getter, so it can never be a read-back of Bitwig, and it is not reported as one.
-            Double readBack = stateCache.getArrangerClipStepSize();
-            if (readBack == null || readBack != restored) {
-                throw new IllegalStateException(
-                    "step size restore did not take: expected " + restored + ", cache holds " + readBack);
+                // Confirm the restore against the cache rather than assuming the write took.
+                // This is a read-back of the engine's own record -- the API publishes no
+                // step-size getter, so it can never be a read-back of Bitwig, and it is not
+                // reported as one. It does NOT run on the null path, where the cache is
+                // deliberately left alone and there is nothing to verify against.
+                Double readBack = stateCache.getArrangerClipStepSize();
+                if (readBack == null || readBack != restored) {
+                    throw new IllegalStateException(
+                        "step size restore did not take: expected " + restored + ", cache holds " + readBack);
+                }
             }
 
             JsonObject result = new JsonObject();
-            result.addProperty("stepSize", restored);
+            result.addProperty("stepSize", savedStepSize != null ? savedStepSize : WIDE_STEP_SIZE);
             result.addProperty("stepSizeRestored", savedStepSize != null);
             return result;
         });

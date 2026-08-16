@@ -276,12 +276,15 @@ class ArrangerClipHandlerTest {
     @Test
     void clearAllNotes_widensTheViewportBeforeClearing() {
         dispatcher.handle(rpc("arrangerClip/clearAllNotes", "{}"));
-        // Twice, because with no prior step size to restore the widened value is what gets
-        // written back — the restore is unconditional rather than branching on whether there
-        // was anything to restore, and reports which of the two happened instead.
-        verify(mockArrangerClip, times(2)).setStepSize(4.0);
+        // INVERTED, not deleted (06-VERIFICATION.md Gap 3, engine half). This used to assert
+        // setStepSize(4.0) and scrollToStep(0) TWICE, with a comment saying "the restore is
+        // unconditional rather than branching on whether there was anything to restore" — which
+        // is precisely the defect: the unconditional restore also wrote 4.0 into the cache, and
+        // getState publishes the cache. The restore now branches, so on the null path the widen
+        // happens ONCE and nothing is written back.
+        verify(mockArrangerClip, times(1)).setStepSize(4.0);
         verify(mockArrangerClip).clearSteps();
-        verify(mockArrangerClip, times(2)).scrollToStep(0);
+        verify(mockArrangerClip, times(1)).scrollToStep(0);
     }
 
     @Test
@@ -301,11 +304,53 @@ class ArrangerClipHandlerTest {
 
     @Test
     void clearAllNotes_saysSoWhenThereWasNothingToRestore() {
+        // INVERTED, not deleted. This asserted `stateCache.getArrangerClipStepSize()` was 4.0
+        // after the call, under a comment claiming "the widened size is kept and reported,
+        // rather than a default being invented and presented as a restoration". The reply field
+        // was honest; the CACHE was not. getState publishes the cache, so writing 4.0 there made
+        // getState report a resolution nobody chose — the invention the comment disclaimed,
+        // one field over. The assertion is inverted to null; the wording is kept as the record
+        // of what the defect was.
         String response = dispatcher.handle(rpc("arrangerClip/clearAllNotes", "{}"));
         assertContains(response, "\"stepSizeRestored\":false");
-        assertEquals(Double.valueOf(4.0), stateCache.getArrangerClipStepSize(),
-            "with no prior value the widened size is kept and reported, "
-            + "rather than a default being invented and presented as a restoration");
+        assertContains(response, "\"stepSize\":4.0");
+        assertNull(stateCache.getArrangerClipStepSize(),
+            "with no prior value the cache must be left untouched, so getState omits stepSize "
+            + "entirely rather than publishing 4.0 as something somebody set");
+    }
+
+    @Test
+    void clearAllNotesLeavesTheCacheNullWhenNothingEverSetAStepSize() {
+        String response = dispatcher.handle(rpc("arrangerClip/clearAllNotes", "{}"));
+
+        assertNull(stateCache.getArrangerClipStepSize(),
+            "nothing chose this value, so nothing may be cached under it");
+        assertContains(response, "\"stepSizeRestored\":false");
+        // The reply still reports the widen, because the widen genuinely happened on the Bitwig
+        // clip. The reply describes a dispatch; the cache describes what somebody chose.
+        assertContains(response, "\"stepSize\":4.0");
+        // And the absence is visible where it matters. JsonRpcDispatcher builds a bare
+        // new Gson() with no serializeNulls(), so a null member is DROPPED from the payload —
+        // getState omits stepSize entirely rather than publishing 4.0 or null.
+        JsonObject state = stateCache.getArrangerClipState();
+        assertTrue(state.get("stepSize").isJsonNull(),
+            "getState must not carry a stepSize value nobody set");
+        assertFalse(new com.google.gson.Gson().toJson(state).contains("stepSize"),
+            "the serialised getState payload must omit stepSize entirely, so a caller can tell "
+            + "'nobody set a grid' apart from 'somebody set 4.0'");
+    }
+
+    @Test
+    void clearAllNotesRestoresAndCachesAPreviouslySetStepSize() {
+        dispatcher.handle(rpc("arrangerClip/setStepSize", "{\"size\":0.5}"));
+        String response = dispatcher.handle(rpc("arrangerClip/clearAllNotes", "{}"));
+
+        verify(mockArrangerClip).setStepSize(4.0);                 // the widen
+        verify(mockArrangerClip, times(2)).setStepSize(0.5);       // caller's own, then restore
+        assertEquals(Double.valueOf(0.5), stateCache.getArrangerClipStepSize(),
+            "a value somebody DID set is restored and cached, unchanged by the null-path fix");
+        assertContains(response, "\"stepSize\":0.5");
+        assertContains(response, "\"stepSizeRestored\":true");
     }
 
     // --- arrangerClip/getNotes ---
