@@ -88,13 +88,32 @@ class HttpRpcServerTest {
     }
 
     @Test
-    void corsHeadersPresent() throws Exception {
+    void corsHeadersCarryNoAllowOriginGrant() throws Exception {
+        // Was corsHeadersPresent, which asserted Access-Control-Allow-Origin: "*" and so
+        // PINNED the defect in place. The wildcard let any page the user visited drive the
+        // DAW cross-origin. The method/header lines remain (they are inert without an origin
+        // grant and keep the OPTIONS preflight path's shape); the origin grant is gone.
         HttpRequest request = HttpRequest.newBuilder()
             .uri(URI.create("http://localhost:" + TEST_PORT + "/health"))
             .GET()
             .build();
 
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals("*", response.headers().firstValue("Access-Control-Allow-Origin").orElse(""));
+        assertTrue(response.headers().firstValue("Access-Control-Allow-Origin").isEmpty(),
+            "Access-Control-Allow-Origin must not be sent at all; a wildcard grant on this "
+                + "unauthenticated port exposes the arrangerClip/* destructive surface to any "
+                + "web page the user visits");
+        assertEquals("POST, GET, OPTIONS",
+            response.headers().firstValue("Access-Control-Allow-Methods").orElse(""));
+    }
+
+    @Test
+    void listenerBindsLoopbackOnlyAndNotTheWildcardAddress() {
+        // HttpServer.create(new InetSocketAddress(port), 0) — the ONE-argument form — is the
+        // wildcard address, which published this unauthenticated DAW control surface to the
+        // whole local network. Filed in phase 02-05, repaired in phase 06-09.
+        assertTrue(server.getBoundAddress().getAddress().isLoopbackAddress(),
+            "HTTP RPC listener must bind loopback, not the wildcard address; bound to "
+                + server.getBoundAddress());
     }
 }

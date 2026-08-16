@@ -8,6 +8,7 @@ import org.java_websocket.WebSocket;
 import org.java_websocket.handshake.ClientHandshake;
 import org.java_websocket.server.WebSocketServer;
 
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.HashSet;
@@ -31,7 +32,11 @@ public class WsRpcServer extends WebSocketServer {
     private final Map<WebSocket, Set<String>> subscriptions = new ConcurrentHashMap<>();
 
     public WsRpcServer(int port, Function<String, CompletableFuture<String>> requestHandler) {
-        super(new InetSocketAddress(port));
+        // Bind LOOPBACK explicitly, for the same reason as HttpRpcServer: the one-argument
+        // InetSocketAddress(int) constructor is the WILDCARD address. This listener dispatches
+        // the same RPC surface as the HTTP one, so loopback-binding only 8787 would have left
+        // the whole exposure live on 8788. Do not revert to the one-argument form.
+        super(new InetSocketAddress(InetAddress.getLoopbackAddress(), port));
         this.requestHandler = requestHandler;
         setReuseAddr(true);
     }

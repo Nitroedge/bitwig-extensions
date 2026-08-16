@@ -36,6 +36,16 @@ class WsRpcServerTest {
     }
 
     @Test
+    void listenerBindsLoopbackOnlyAndNotTheWildcardAddress() {
+        // Same defect and same repair as HttpRpcServer: super(new InetSocketAddress(port)) is
+        // the WILDCARD constructor. This listener dispatches the same RPC surface, so fixing
+        // only 8787 would have left the whole exposure live on 8788.
+        assertTrue(server.getAddress().getAddress().isLoopbackAddress(),
+            "WebSocket RPC listener must bind loopback, not the wildcard address; bound to "
+                + server.getAddress());
+    }
+
+    @Test
     void clientReceivesResponse() throws Exception {
         CompletableFuture<String> responseFuture = new CompletableFuture<>();
 

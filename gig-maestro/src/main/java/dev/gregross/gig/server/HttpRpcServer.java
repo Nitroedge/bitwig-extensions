@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
@@ -19,7 +20,10 @@ public class HttpRpcServer {
     private static final long TIMEOUT_MS = 5000;
 
     public HttpRpcServer(int port, Function<String, CompletableFuture<String>> requestHandler) throws IOException {
-        server = HttpServer.create(new InetSocketAddress(port), 0);
+        // Bind LOOPBACK explicitly. The one-argument InetSocketAddress(int) constructor
+        // is the WILDCARD address, which exposed this unauthenticated DAW control surface
+        // to the whole local network. Do not revert to the one-argument form.
+        server = HttpServer.create(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
         server.setExecutor(Executors.newFixedThreadPool(4));
 
         server.createContext("/rpc", exchange -> handleRpc(exchange, requestHandler));
@@ -114,8 +118,19 @@ public class HttpRpcServer {
     }
 
     private void addCorsHeaders(HttpExchange exchange) {
-        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        // NO Access-Control-Allow-Origin header. It was previously "*", which let any web
+        // page the user happened to visit issue cross-origin requests to this port and drive
+        // the DAW — including, since the arrangerClip/* namespace landed, destructive edits to
+        // timeline material. The only in-project browser consumer is the Scalar docs UI served
+        // from /docs by this same server, which is SAME-ORIGIN and needs no CORS grant at all.
+        // If a genuine cross-origin consumer is ever added, echo a specific allow-listed origin
+        // here — never the wildcard.
         exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
         exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
+    }
+
+    /** The address this server is actually bound to. Exposed so tests can assert loopback. */
+    InetSocketAddress getBoundAddress() {
+        return server.getAddress();
     }
 }
