@@ -23,7 +23,6 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
-import static dev.gregross.gig.extension.StateCacheTestHelper.sceneCountOf;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -359,11 +358,37 @@ class TrackHandlerTest {
         verify(mockCursorTrack).duplicate();
     }
 
+    /**
+     * THIS TEST WAS INVERTED, DELIBERATELY, AND THE OLD ASSERTION IS RECORDED HERE RATHER THAN
+     * DELETED. It read:
+     *
+     * <pre>
+     *     dispatcher.handle(rpc("track/createGroup", "{}"));
+     *     verify(mockCursorTrack).createParentTrack(4, sceneCountOf(TrackHandler.class));
+     * </pre>
+     *
+     * <p>It passed for the whole life of the method and proved nothing that mattered. Against a
+     * MOCK {@code CursorTrack}, {@code createParentTrack} is just a recorded interaction; against
+     * the real host it is an OBJECT-PROXY FACTORY whose complete javadoc reads "Creates an object
+     * that represent the parent track", may only be called during driver initialization, and has
+     * never made a group track at any pin, on any platform (finding O-33). A green test asserting
+     * that we call it was a green test asserting we do the wrong thing correctly -- which is the
+     * silent-wrong-output class this project exists against.
+     *
+     * <p>Decided at plan 06-08's Task 3 checkpoint (option {@code refuse-with-message}).
+     */
     @Test
-    void createGroup_callsCursorTrackCreateParentTrack() {
-        dispatcher.handle(rpc("track/createGroup", "{}"));
+    void createGroup_refusesAndNamesWhatTheApiActuallyOffers() {
+        String response = dispatcher.handle(rpc("track/createGroup", "{}"));
 
-        verify(mockCursorTrack).createParentTrack(4, sceneCountOf(TrackHandler.class));
+        assertContains(response, "-32001");
+        assertContains(response, "GROUP_CREATION_NOT_SUPPORTED_BY_API");
+        // The refusal must carry the platform limit and the route that does work, not a bare
+        // apology -- that is the entire difference between this and the -32603 it replaces.
+        assertContains(response, "Create Group Track");
+        assertContains(response, "group-track creation method");
+
+        verify(mockCursorTrack, never()).createParentTrack(anyInt(), anyInt());
     }
 
     @Test

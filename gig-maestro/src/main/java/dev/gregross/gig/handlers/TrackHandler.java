@@ -213,9 +213,66 @@ public class TrackHandler {
             return ok();
         });
 
+        // THIS METHOD IS MISNAMED AND HAS NEVER CREATED A GROUP TRACK, AT ANY PIN, ON ANY
+        // PLATFORM. It is kept registered, and made to refuse informatively, rather than
+        // deleted: the name is already published, and a caller who reaches for it deserves
+        // to be told what the platform actually offers instead of an obscure failure.
+        //
+        // What it used to call: `cursorTrack.createParentTrack(SEND_COUNT, SCENE_COUNT)`.
+        // That is an OBJECT-PROXY FACTORY. Its complete javadoc in the Controller API v25
+        // reference (docs/bitwig-api-reference.txt:3832) reads, in full:
+        //
+        //     "Creates an object that represent the parent track."
+        //
+        // It is in the same family as its immediate neighbours -- the siblings-track-bank
+        // factory and the two insertion-point accessors -- and Bitwig requires host-object
+        // factories to be called during driver initialisation. That is exactly what the old
+        // body reported: JSON-RPC -32603, "This can only be called during driver
+        // initialization" (finding O-33, observed live 2026-08-14). The refusal was never a
+        // timing problem or a missing permission; the call could not have made a group even
+        // if it had been allowed to run, because making a group is not what it does.
+        //
+        // AND CONTROLLER API v25 CONTAINS NO GROUP-TRACK CREATION METHOD AT ALL. An
+        // exhaustive search of the reference returns only observers and navigation: the
+        // group tests, the group-expanded test, a track-type value reporting Group,
+        // navigate-into and navigate-to-parent, set-index-in-group, select-parent, and the
+        // two root/top-level group accessors. Nothing creates one. So moving the call into
+        // initialisation would build a proxy object at startup and still never make a group.
+        //
+        // WHAT DOES WORK, and it is named in the refusal below so the next reader does not
+        // have to find it: Bitwig's own named action `Create Group Track` (menu text "Add
+        // Group Track", category Project), reachable through `action/invoke`. Observed live
+        // 2026-08-16 at engine SHA 0c21850 -- it created a group track. Note that an action
+        // invoke returns void and publishes no per-action outcome, so its success is read
+        // back from the track list afterwards, never from the invoke itself.
+        //
+        // Decided at plan 06-08's Task 3 checkpoint. The two options not chosen were
+        // `leave-both` (record the finding only) and `rename-and-deprecate` (rename the RPC
+        // method and remove the tool's operation member). `bitwig_track`'s published
+        // `create_group` operation is DELIBERATELY LEFT IN PLACE: the schema is published
+        // once and Claude has already been conformed to it, so the member stays and now
+        // fails informatively instead of obscurely.
         dispatcher.register("track/createGroup", params -> {
-            cursorTrack.createParentTrack(SEND_COUNT, SCENE_COUNT);
-            return ok();
+            JsonObject data = new JsonObject();
+            data.addProperty("reason",
+                "track/createGroup is misnamed and cannot work. It called "
+                + "CursorTrack.createParentTrack(...), which is an object-proxy factory whose "
+                + "complete javadoc reads \"Creates an object that represent the parent track\" "
+                + "-- it does not create a group track, and host-object factories may only be "
+                + "called during driver initialization, which is what the old -32603 reported.");
+            data.addProperty("platformLimit",
+                "Bitwig Controller API v25 contains NO group-track creation method at all. An "
+                + "exhaustive search of the reference returns only observers and navigation: "
+                + "isGroup, isGroupExpanded, a track-type value reporting Group, "
+                + "navigateIntoTrackGroup, navigateToParentTrackGroup, setIndexInGroup, "
+                + "selectParent, and the root/top-level group accessors. Nothing creates one.");
+            data.addProperty("useInstead",
+                "Invoke Bitwig's named action \"Create Group Track\" (menu text \"Add Group "
+                + "Track\", category Project) via action/invoke. An action invoke returns void "
+                + "and publishes no per-action outcome, so read the result back from the track "
+                + "list rather than from the invoke.");
+            data.addProperty("finding", "O-33; decision recorded by plan 06-08 Task 3");
+            throw new RpcException(-32001, "GROUP_CREATION_NOT_SUPPORTED_BY_API", data);
         });
 
         dispatcher.register("track/addNoteSource", params -> {

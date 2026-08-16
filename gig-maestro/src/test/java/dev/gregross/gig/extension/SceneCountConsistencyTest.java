@@ -55,8 +55,15 @@ class SceneCountConsistencyTest {
             + "index for scene/rename, scene/delete, scene/duplicate and the launch family\n"
             + "  src/main/java/dev/gregross/gig/handlers/ClipHandler.java -- validates the scene "
             + "index for scene/launch\n"
-            + "  src/main/java/dev/gregross/gig/handlers/TrackHandler.java -- passes it to "
-            + "cursorTrack.createParentTrack(SEND_COUNT, SCENE_COUNT) for track/createGroup\n"
+            + "  src/main/java/dev/gregross/gig/handlers/TrackHandler.java -- VESTIGIAL SINCE "
+            + "plan 06-08 (2026-08-16) and kept ON PURPOSE. It used to be passed to "
+            + "cursorTrack.createParentTrack(SEND_COUNT, SCENE_COUNT) for track/createGroup; that "
+            + "method now refuses with GROUP_CREATION_NOT_SUPPORTED_BY_API, because "
+            + "createParentTrack is an object-proxy factory and Controller API v25 has no "
+            + "group-track creation method at all (finding O-33). The declaration stays so this "
+            + "guard keeps covering five sites rather than quietly shrinking to four, and so a "
+            + "future re-wiring of TrackHandler to the scene bank inherits the agreement instead "
+            + "of re-deriving a literal.\n"
             + "Change all five or none.";
 
     @Test
