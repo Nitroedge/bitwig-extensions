@@ -51,6 +51,32 @@ public class StateCacheTestHelper {
         }
     }
 
+    /**
+     * Reads a private static {@code FLUSH_DELAY_MS} from the given class.
+     *
+     * <p>Three classes in {@code dev.gregross.gig.handlers} declare their own
+     * {@code private static final long FLUSH_DELAY_MS}: {@code MacroHandler},
+     * {@code DeviceHandler} and {@code MasterDeviceHandler}. Nothing in the compiler links
+     * them. The read goes through here rather than being inlined in the test for the reason
+     * {@link #trackCountOf(Class)} and {@link #sceneCountOf(Class)} exist -- a test that
+     * restates the value as a literal is a test that can be left behind asserting the old
+     * number, and {@code setAccessible(true)} is what lets a test in package
+     * {@code dev.gregross.gig.extension} read three declarations that live in another package.
+     *
+     * <p>It returns {@code long}, not {@code int}: the constant is declared {@code long}
+     * because it is passed to {@code TaskScheduler.schedule(Runnable, long)}, and reading it
+     * as an int would throw rather than fail with the message this guard is built to give.
+     */
+    static long flushDelayOf(Class<?> owner) {
+        try {
+            Field field = owner.getDeclaredField("FLUSH_DELAY_MS");
+            field.setAccessible(true);
+            return field.getLong(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read FLUSH_DELAY_MS from: " + owner.getName(), e);
+        }
+    }
+
     static void setField(StateCache cache, String fieldName, Object value) {
         try {
             Field field = StateCache.class.getDeclaredField(fieldName);
