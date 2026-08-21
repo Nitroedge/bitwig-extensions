@@ -4,4 +4,4 @@ plugins {
 
 rootProject.name = "bitwig-extensions"
 
-include("gig-maestro", "launchpad-mk2")
+include("bitwig-pal", "launchpad-mk2")
