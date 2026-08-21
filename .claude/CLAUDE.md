@@ -4,15 +4,15 @@ Multi-module Gradle project containing Bitwig Studio controller extensions.
 
 ## Modules
 
-### gig-maestro
+### bitwig-pal
 RPC-based Bitwig controller extension + CLI tool.
-- Extension source: `gig-maestro/src/main/java/dev/gregross/gig/`
-- CLI source: `gig-maestro/src/cli/java/dev/gregross/gig/cli/`
-- Tests: `gig-maestro/src/test/java/dev/gregross/gig/`
-- Tool schemas: `gig-maestro/tools/claude-tools.json`
-- System prompt: `gig-maestro/tools/system-prompt.md`
-- Smoke tests: `gig-maestro/scripts/smoke-test.sh` (runner)
-- Test scripts: `gig-maestro/scripts/tests/` (per-flow, shared helpers)
+- Extension source: `bitwig-pal/src/main/java/dev/bcrick/bitwigpal/`
+- CLI source: `bitwig-pal/src/cli/java/dev/bcrick/bitwigpal/cli/`
+- Tests: `bitwig-pal/src/test/java/dev/bcrick/bitwigpal/`
+- Tool schemas: `bitwig-pal/tools/claude-tools.json`
+- System prompt: `bitwig-pal/tools/system-prompt.md`
+- Smoke tests: `bitwig-pal/scripts/smoke-test.sh` (runner)
+- Test scripts: `bitwig-pal/scripts/tests/` (per-flow, shared helpers)
 
 ### launchpad-mk2
 Novation Launchpad MK2 controller extension.
@@ -20,7 +20,7 @@ Novation Launchpad MK2 controller extension.
 
 ## Bitwig API Reference
 
-The full Bitwig Controller API v25 reference is at `gig-maestro/docs/bitwig-api-reference.txt` (18K+ lines).
+The full Bitwig Controller API v25 reference is at `bitwig-pal/docs/bitwig-api-reference.txt` (18K+ lines).
 **Always read this file** (or relevant sections via grep) when:
 - Investigating what API methods are available for a feature
 - Checking method signatures, parameter types, return types
@@ -29,30 +29,30 @@ The full Bitwig Controller API v25 reference is at `gig-maestro/docs/bitwig-api-
 
 ## Build Commands
 
-- `./gradlew :gig-maestro:shadowJar` — build gig-maestro extension (outputs to Bitwig Extensions dir)
-- `./gradlew :gig-maestro:cliShadowJar` — build CLI JAR
-- `./gradlew :gig-maestro:test` — run gig-maestro unit tests
+- `./gradlew :bitwig-pal:shadowJar` — build bitwig-pal extension (outputs to Bitwig Extensions dir)
+- `./gradlew :bitwig-pal:cliShadowJar` — build CLI JAR
+- `./gradlew :bitwig-pal:test` — run bitwig-pal unit tests
 - `./gradlew :launchpad-mk2:build` — build launchpad-mk2 extension
 - `./gradlew :launchpad-mk2:install` — install to Bitwig Extensions dir
 - `./gradlew clean build` — build everything
-- `gig-maestro/scripts/smoke-test.sh` — full smoke suite (requires Bitwig running)
-- `gig-maestro/scripts/smoke-test.sh --offline` — offline tests only
+- `bitwig-pal/scripts/smoke-test.sh` — full smoke suite (requires Bitwig running)
+- `bitwig-pal/scripts/smoke-test.sh --offline` — offline tests only
 
 ## Testing Requirements
 
 Every phase MUST include all three testing layers during governance:
 
 ### 1. Unit Tests (automated, no Bitwig)
-- `./gradlew :gig-maestro:test` — run before every commit
+- `./gradlew :bitwig-pal:test` — run before every commit
 - Mock-based, verifies logic and validation in isolation
 
 ### 2. Smoke Tests (automated, per-flow scripts)
-- `gig-maestro/scripts/smoke-test.sh` — runner (all tests)
-- `gig-maestro/scripts/smoke-test.sh --offline` — schema/build checks only (no Bitwig)
-- `gig-maestro/scripts/smoke-test.sh --online` — online tests only (requires Bitwig)
-- `gig-maestro/scripts/smoke-test.sh --only NAME` — run specific test(s)
-- `gig-maestro/scripts/smoke-test.sh --list` — list available test scripts
-- Test scripts live in `gig-maestro/scripts/tests/`, each sourcing `_helpers.sh`
+- `bitwig-pal/scripts/smoke-test.sh` — runner (all tests)
+- `bitwig-pal/scripts/smoke-test.sh --offline` — schema/build checks only (no Bitwig)
+- `bitwig-pal/scripts/smoke-test.sh --online` — online tests only (requires Bitwig)
+- `bitwig-pal/scripts/smoke-test.sh --only NAME` — run specific test(s)
+- `bitwig-pal/scripts/smoke-test.sh --list` — list available test scripts
+- Test scripts live in `bitwig-pal/scripts/tests/`, each sourcing `_helpers.sh`
 - Offline scripts: `offline-schemas.sh` (data-driven), `offline-builds.sh`
 - Online scripts: `transport`, `tracks`, `clips`, `notes`, `devices`, `arranger`, `arranger-clip`, `mixer`, `browser`, `project`, `clip-launcher`, `health`, `errors`
   - `arranger` is arranger VIEW control; `arranger-clip` is arranger CLIP CONTENT (the `arrangerClip/*` namespace) and needs a clip selected by hand in the timeline
