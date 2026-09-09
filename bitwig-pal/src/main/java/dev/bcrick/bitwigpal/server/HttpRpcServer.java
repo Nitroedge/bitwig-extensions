@@ -3,6 +3,8 @@ package dev.bcrick.bitwigpal.server;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import dev.bcrick.bitwigpal.BitwigPalVersion;
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -173,9 +175,16 @@ public class HttpRpcServer {
             + reason + "\"},\"id\":null}";
     }
 
+    /**
+     * The version reported here is {@link BitwigPalVersion#VERSION} and is deliberately NOT a
+     * literal. It used to be one, and it was the only version string reachable over the wire, so
+     * a drift between it and the extension's own {@code getVersion()} made bitwig-pal's
+     * version-mismatch diagnosis report the wrong number (D-21-H).
+     */
     private void handleHealth(HttpExchange exchange) throws IOException {
         addCorsHeaders(exchange);
-        sendResponse(exchange, 200, "{\"status\":\"ok\",\"version\":\"0.1.0\"}");
+        sendResponse(exchange, 200,
+            "{\"status\":\"ok\",\"version\":\"" + BitwigPalVersion.VERSION + "\"}");
     }
 
     private void handleDocs(HttpExchange exchange) throws IOException {

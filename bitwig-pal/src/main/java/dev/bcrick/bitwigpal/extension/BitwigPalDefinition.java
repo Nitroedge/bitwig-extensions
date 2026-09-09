@@ -6,6 +6,8 @@ import com.bitwig.extension.controller.ControllerExtension;
 import com.bitwig.extension.controller.ControllerExtensionDefinition;
 import com.bitwig.extension.controller.api.ControllerHost;
 
+import dev.bcrick.bitwigpal.BitwigPalVersion;
+
 import java.util.UUID;
 
 public class BitwigPalDefinition extends ControllerExtensionDefinition {
@@ -24,7 +26,7 @@ public class BitwigPalDefinition extends ControllerExtensionDefinition {
 
     @Override
     public String getVersion() {
-        return "0.1.0";
+        return BitwigPalVersion.VERSION;
     }
 
     @Override

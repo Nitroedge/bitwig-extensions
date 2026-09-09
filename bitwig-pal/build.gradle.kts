@@ -3,7 +3,10 @@ plugins {
 }
 
 group = "dev.bcrick"
-version = "0.1.0"
+// Pinned equal to dev.bcrick.bitwigpal.BitwigPalVersion.VERSION by VersionConsistencyTest, which
+// reads this line as text -- a JUnit test cannot see a Gradle value any other way. D-21-H: one
+// version string. Move this and the constant together, or the test fails naming both.
+version = "0.2.0"
 
 val bitwigExtensionsDir: String by project
 

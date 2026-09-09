@@ -1,5 +1,6 @@
 package dev.bcrick.bitwigpal.server;
 
+import dev.bcrick.bitwigpal.BitwigPalVersion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -56,7 +57,16 @@ class HttpRpcServerTest {
         HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
         assertEquals(200, response.statusCode());
         assertTrue(response.body().contains("\"status\":\"ok\""));
-        assertTrue(response.body().contains("\"version\":\"0.1.0\""));
+        // The constant, NOT a restated literal. This assertion used to spell "0.1.0" by hand,
+        // which meant it pinned the health body to a number rather than to the engine's version:
+        // moving BitwigPalVersion.VERSION alone would have failed here and read as a regression,
+        // and -- worse -- a health body that had drifted away from getVersion() would still have
+        // passed as long as both had drifted to the same typo. It now asserts the body reports
+        // the version this engine declares (D-21-H).
+        assertTrue(
+            response.body().contains("\"version\":\"" + BitwigPalVersion.VERSION + "\""),
+            "/health must report BitwigPalVersion.VERSION (" + BitwigPalVersion.VERSION
+                + "); body was: " + response.body());
     }
 
     @Test
@@ -166,7 +176,6 @@ class HttpRpcServerTest {
             }
         }
     }
-
 
     @Test
     void refusesARpcPostCarryingAForeignOrigin() throws Exception {

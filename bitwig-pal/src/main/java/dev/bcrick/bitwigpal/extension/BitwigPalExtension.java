@@ -5,6 +5,7 @@ import com.bitwig.extension.controller.api.*;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import dev.bcrick.bitwigpal.BitwigPalVersion;
 import dev.bcrick.bitwigpal.handlers.ApplicationHandler;
 import dev.bcrick.bitwigpal.handlers.ArrangerClipHandler;
 import dev.bcrick.bitwigpal.handlers.ArrangerHandler;
@@ -184,6 +185,19 @@ public class BitwigPalExtension extends ControllerExtension {
                 methods.add(new JsonPrimitive(method));
             }
             return methods;
+        });
+
+        // Register api/version handler. It sits beside api/list on purpose: the release number is
+        // a fact about this engine in the same sense the method list is, and putting it on the
+        // dispatcher means a caller reaches it through the ordinary JSON-RPC path rather than
+        // through a second code path to /health. bitwig-pal's `diagnose` tool refuses to GET
+        // /health for exactly that reason, so this method is what its engine-version probe calls.
+        // The value is BitwigPalVersion.VERSION -- the same constant getVersion() and the /health
+        // body read (D-21-H).
+        dispatcher.register("api/version", params -> {
+            JsonObject version = new JsonObject();
+            version.addProperty("version", BitwigPalVersion.VERSION);
+            return version;
         });
 
         // Register handlers
