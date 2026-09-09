@@ -145,10 +145,28 @@ class HttpRpcServerTest {
                 .write(req.toString().getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             socket.getOutputStream().write(payload);
             socket.getOutputStream().flush();
-            return new String(socket.getInputStream().readAllBytes(),
-                java.nio.charset.StandardCharsets.UTF_8);
+            try {
+                return new String(socket.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            } catch (java.net.SocketException reset) {
+                // A reset here means the connection died before this server answered, so nothing
+                // about the guard under test was exercised -- which is a FAILURE and not a pass,
+                // and it must say WHY it is unreadable rather than surfacing a bare stack trace.
+                // Measured cause on the bitwig-pal validation machine, 2026-09-09: a machine-local
+                // web shield resets a plaintext HTTP connection carrying certain Host names before
+                // any listener sees a byte. See refusesARpcPostWhoseHostIsNotLoopback below.
+                throw new AssertionError(
+                    "the connection was reset before this server answered (Host: " + hostHeader
+                        + (originHeader == null ? "" : ", Origin: " + originHeader)
+                        + "), so the guard under test was never exercised. This is NOT an engine "
+                        + "failure on its own: a machine-local network filter that blocks the "
+                        + "header value used as a fixture produces exactly this. Reproduce with "
+                        + "any minimal socket server on this port before changing engine code.",
+                    reset);
+            }
         }
     }
+
 
     @Test
     void refusesARpcPostCarryingAForeignOrigin() throws Exception {
@@ -176,7 +194,22 @@ class HttpRpcServerTest {
         // DNS rebinding: the loopback bind cannot tell this apart from a legitimate request,
         // because the packet really does arrive on 127.0.0.1. The Host header is what gives it
         // away.
-        String response = rawPost("/rpc", "attacker.example.com", null, ECHO);
+        //
+        // THE NAME IS `attacker.example`, NOT `attacker.example.com`, AND THAT IS A MEASUREMENT
+        // RATHER THAN A PREFERENCE. This case read `attacker.example.com` from 2026-08-16 until
+        // 2026-09-09, when it began failing on the bitwig-pal validation machine with
+        // `SocketException: Connection reset` inside rawPost -- never reaching an assertion. It
+        // was proven NOT to be an engine defect: a fifteen-line Python socket server containing
+        // none of this code, on the same port, was reset identically for that one Host value
+        // while `attacker.example`, `rebound.example.com`, `example.com`, `not-loopback.invalid`,
+        // `evil.example` and `192.0.2.1` all reached it and were answered. Something on that
+        // machine (a web shield's name blocklist) kills a plaintext HTTP connection whose Host is
+        // that specific FQDN, before the server sees a byte. The subject of this test is "a Host
+        // that is not a loopback authority", and any non-loopback name proves it, so the fixture
+        // moved to the RFC 2606 reserved `.example` TLD -- which is also exactly what
+        // bitwig-pal's own `tests/test_transport_http.py` sends, so the two repositories now
+        // agree on one fixture instead of drifting.
+        String response = rawPost("/rpc", "attacker.example", null, ECHO);
 
         assertTrue(response.startsWith("HTTP/1.1 403"),
             "got: " + response.lines().findFirst().orElse(""));
