@@ -347,7 +347,7 @@ public class BitwigPalExtension extends ControllerExtension {
      */
     private DeviceLibrary failLoudly(String reason) {
         host.errorln("############################################################");
-        host.errorln("# GIG MAESTRO: Device library NOT found.");
+        host.errorln("# BITWIG PAL: Device library NOT found.");
         host.errorln("# Reason: " + reason);
         host.errorln("# device/insertBitwigDevice and device/listBitwigDevices will not find any");
         host.errorln("# devices until this is fixed.");
