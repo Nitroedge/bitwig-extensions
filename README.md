@@ -6,15 +6,15 @@ Multi-module Gradle project containing custom [Bitwig Studio](https://www.bitwig
 
 | Module | Description | Details |
 |--------|-------------|---------|
-| [bitwig-pal](bitwig-pal/) | RPC-based controller extension — control Bitwig via JSON-RPC over HTTP/WebSocket, with a companion CLI and interactive API docs | [README](bitwig-pal/README.md) |
+| [secondo](secondo/) | RPC-based controller extension — control Bitwig via JSON-RPC over HTTP/WebSocket, with a companion CLI and interactive API docs | [README](secondo/README.md) |
 | [launchpad-mk2](launchpad-mk2/) | Novation Launchpad MK2 controller extension with RGB clip launcher grid | [README](launchpad-mk2/README.md) |
 
 ```mermaid
 graph LR
     BW[Bitwig Studio]
-    GM[bitwig-pal Extension]
+    GM[secondo Extension]
     LP[launchpad-mk2 Extension]
-    CLI[bitwig-pal CLI]
+    CLI[secondo CLI]
     WS[WebSocket Clients]
     HTTP[HTTP Clients]
     PAD[Launchpad MK2 Hardware]
@@ -51,11 +51,11 @@ graph LR
 git clone https://github.com/gregrossdev/bitwig-extensions.git
 cd bitwig-extensions
 
-# Build bitwig-pal extension (.bwextension)
-./gradlew :bitwig-pal:shadowJar
+# Build secondo extension (.bwextension)
+./gradlew :secondo:shadowJar
 
-# Build bitwig-pal CLI
-./gradlew :bitwig-pal:cliShadowJar
+# Build secondo CLI
+./gradlew :secondo:cliShadowJar
 
 # Build launchpad-mk2 extension
 ./gradlew :launchpad-mk2:build
@@ -64,10 +64,10 @@ cd bitwig-extensions
 ./gradlew clean build
 
 # Run tests
-./gradlew :bitwig-pal:test
+./gradlew :secondo:test
 ```
 
-After building, enable the extension in Bitwig: **Settings > Controllers > Add Controller > bcrick > Bitwig Pal**.
+After building, enable the extension in Bitwig: **Settings > Controllers > Add Controller > bcrick > Secondo**.
 
 Then try it:
 
@@ -77,8 +77,8 @@ curl -s http://localhost:8787/rpc \
   -d '{"jsonrpc":"2.0","method":"session/snapshot","params":{},"id":1}' | jq .result
 
 # Or use the CLI
-bitwig-pal transport play
-bitwig-pal --pretty snapshot
+secondo transport play
+secondo --pretty snapshot
 
 # Open interactive API docs in your browser
 open http://localhost:8787/docs
@@ -88,9 +88,9 @@ open http://localhost:8787/docs
 
 | Resource | Description |
 |----------|-------------|
-| [bitwig-pal README](bitwig-pal/README.md) | Architecture, setup, quick start, user stories |
-| [CLI Reference](bitwig-pal/docs/cli-reference.md) | All 12 CLI commands with options and examples |
-| [RPC API Reference](bitwig-pal/docs/rpc-api-reference.md) | All 306 methods with parameters |
+| [secondo README](secondo/README.md) | Architecture, setup, quick start, user stories |
+| [CLI Reference](secondo/docs/cli-reference.md) | All 12 CLI commands with options and examples |
+| [RPC API Reference](secondo/docs/rpc-api-reference.md) | All 306 methods with parameters |
 | [Interactive API Docs](http://localhost:8787/docs) | Scalar-powered browser with live "Try It" (requires Bitwig) |
 | [launchpad-mk2 README](launchpad-mk2/README.md) | Button map, LED colors, setup guide |
 
@@ -98,7 +98,7 @@ open http://localhost:8787/docs
 
 ```
 bitwig-extensions/
-├── bitwig-pal/
+├── secondo/
 │   ├── src/main/java/    # Extension source (21 handlers)
 │   ├── src/cli/java/     # CLI source (PicoCLI)
 │   ├── src/test/java/    # JUnit 5 tests (24+ classes)

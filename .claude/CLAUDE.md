@@ -4,15 +4,15 @@ Multi-module Gradle project containing Bitwig Studio controller extensions.
 
 ## Modules
 
-### bitwig-pal
+### secondo
 RPC-based Bitwig controller extension + CLI tool.
-- Extension source: `bitwig-pal/src/main/java/dev/bcrick/bitwigpal/`
-- CLI source: `bitwig-pal/src/cli/java/dev/bcrick/bitwigpal/cli/`
-- Tests: `bitwig-pal/src/test/java/dev/bcrick/bitwigpal/`
-- Tool schemas: `bitwig-pal/tools/claude-tools.json`
-- System prompt: `bitwig-pal/tools/system-prompt.md`
-- Smoke tests: `bitwig-pal/scripts/smoke-test.sh` (runner)
-- Test scripts: `bitwig-pal/scripts/tests/` (per-flow, shared helpers)
+- Extension source: `secondo/src/main/java/dev/bcrick/secondo/`
+- CLI source: `secondo/src/cli/java/dev/bcrick/secondo/cli/`
+- Tests: `secondo/src/test/java/dev/bcrick/secondo/`
+- Tool schemas: `secondo/tools/claude-tools.json`
+- System prompt: `secondo/tools/system-prompt.md`
+- Smoke tests: `secondo/scripts/smoke-test.sh` (runner)
+- Test scripts: `secondo/scripts/tests/` (per-flow, shared helpers)
 
 ### launchpad-mk2
 Novation Launchpad MK2 controller extension.
@@ -20,7 +20,7 @@ Novation Launchpad MK2 controller extension.
 
 ## Bitwig API Reference
 
-The full Bitwig Controller API v25 reference is at `bitwig-pal/docs/bitwig-api-reference.txt` (18K+ lines).
+The full Bitwig Controller API v25 reference is at `secondo/docs/bitwig-api-reference.txt` (18K+ lines).
 **Always read this file** (or relevant sections via grep) when:
 - Investigating what API methods are available for a feature
 - Checking method signatures, parameter types, return types
@@ -29,30 +29,30 @@ The full Bitwig Controller API v25 reference is at `bitwig-pal/docs/bitwig-api-r
 
 ## Build Commands
 
-- `./gradlew :bitwig-pal:shadowJar` — build bitwig-pal extension (outputs to Bitwig Extensions dir)
-- `./gradlew :bitwig-pal:cliShadowJar` — build CLI JAR
-- `./gradlew :bitwig-pal:test` — run bitwig-pal unit tests
+- `./gradlew :secondo:shadowJar` — build secondo extension (outputs to Bitwig Extensions dir)
+- `./gradlew :secondo:cliShadowJar` — build CLI JAR
+- `./gradlew :secondo:test` — run secondo unit tests
 - `./gradlew :launchpad-mk2:build` — build launchpad-mk2 extension
 - `./gradlew :launchpad-mk2:install` — install to Bitwig Extensions dir
 - `./gradlew clean build` — build everything
-- `bitwig-pal/scripts/smoke-test.sh` — full smoke suite (requires Bitwig running)
-- `bitwig-pal/scripts/smoke-test.sh --offline` — offline tests only
+- `secondo/scripts/smoke-test.sh` — full smoke suite (requires Bitwig running)
+- `secondo/scripts/smoke-test.sh --offline` — offline tests only
 
 ## Testing Requirements
 
 Every phase MUST include all three testing layers during governance:
 
 ### 1. Unit Tests (automated, no Bitwig)
-- `./gradlew :bitwig-pal:test` — run before every commit
+- `./gradlew :secondo:test` — run before every commit
 - Mock-based, verifies logic and validation in isolation
 
 ### 2. Smoke Tests (automated, per-flow scripts)
-- `bitwig-pal/scripts/smoke-test.sh` — runner (all tests)
-- `bitwig-pal/scripts/smoke-test.sh --offline` — schema/build checks only (no Bitwig)
-- `bitwig-pal/scripts/smoke-test.sh --online` — online tests only (requires Bitwig)
-- `bitwig-pal/scripts/smoke-test.sh --only NAME` — run specific test(s)
-- `bitwig-pal/scripts/smoke-test.sh --list` — list available test scripts
-- Test scripts live in `bitwig-pal/scripts/tests/`, each sourcing `_helpers.sh`
+- `secondo/scripts/smoke-test.sh` — runner (all tests)
+- `secondo/scripts/smoke-test.sh --offline` — schema/build checks only (no Bitwig)
+- `secondo/scripts/smoke-test.sh --online` — online tests only (requires Bitwig)
+- `secondo/scripts/smoke-test.sh --only NAME` — run specific test(s)
+- `secondo/scripts/smoke-test.sh --list` — list available test scripts
+- Test scripts live in `secondo/scripts/tests/`, each sourcing `_helpers.sh`
 - Offline scripts: `offline-schemas.sh` (data-driven), `offline-builds.sh`
 - Online scripts: `transport`, `tracks`, `clips`, `notes`, `devices`, `arranger`, `arranger-clip`, `mixer`, `browser`, `project`, `clip-launcher`, `health`, `errors`
   - `arranger` is arranger VIEW control; `arranger-clip` is arranger CLIP CONTENT (the `arrangerClip/*` namespace) and needs a clip selected by hand in the timeline

@@ -20,7 +20,7 @@ target/
 Thumbs.db
 
 # Generated
-bitwig-pal/docs/openapi.json
+secondo/docs/openapi.json
 
 # Environment
 .env
