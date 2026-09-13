@@ -3246,6 +3246,81 @@ clips or move the cursor until the write in front of it has finished its last cu
 expressions included. This removes the case where write N+1's cursor move lands inside write N's
 verify window.
 
+#### Design record (Phase 23, plan 23-08, 2026-09-13)
+
+This block is the single record of why the launcher write is shaped the way it is. Phase 23's pin
+move note and the `TODO-WRONG-SLOT` ledger row cite it rather than restating it; if this and they
+ever disagree, this is the one that was written against the source.
+
+**There is no non-cursor route, and that was checked rather than assumed.** The fix's first branch
+would have removed the deferred cursor write entirely by writing to a `Clip` obtained for the named
+slot directly — which kills the whole class of bug rather than this instance of it. It does not
+exist at API v25. Enumerated against `bitwig-api-reference.txt`, the v25 `extension-api` reference
+this engine builds against:
+
+- `ClipLauncherSlot` has **no note surface at all**. Its complete member list at lines
+  **6155-6260** is `isSelected`, `hasContent`, `isPlaying`, `isPlaybackQueued`, `isRecording`,
+  `isRecordingQueued`, `isStopQueued`, `browseToInsertClip`, `color`, `select`/`selectAction`,
+  `record`/`recordAction`, `showInEditor` — no note, step, grid or `Clip` accessor.
+- `createLauncherCursorClip` lives on `CursorTrack` (`:9664`, `:9674`), not on `Track`. `Track`
+  carries no clip factory, so there is no per-track launcher clip object to write to.
+- The `ControllerHost` overload (`:14851-14869`) exists and is **deprecated**; it returns a bare
+  `Clip` following the host's own selection, which is strictly worse than what the engine has.
+- `CursorClip#selectClip(Clip)` (`:9812-9818`) can only re-point the cursor at a `Clip` you already
+  hold, and per the first bullet there is no way to obtain one for an arbitrary slot.
+
+So the deferred cursor write stays, and is verified instead of removed. Do not re-search this; if
+a future API version adds a slot-level note surface, that is a new finding, not a correction.
+
+**A premise this plan was written on was false, and is recorded because catching it was the
+process working.** The plan asserted that RPC handlers run on the four HTTP threads
+(`HttpRpcServer.java:61`) and that a handler could therefore block on a future its scheduled task
+completes. It cannot. `SecondoExtension.handleRequest` (`:258-261`) only *enqueues*; the handler is
+executed by `CommandQueue.drainAndExecute` from inside `flush()` on the Control Surface Session
+thread (`CommandQueue.java:20-22`), and `host.scheduleTask` schedules onto that same thread. A
+handler that blocked on its own deferred verify would block the flush the verify is waiting for —
+a deadlock, not a slow path, and one the JUnit suite would not have caught because a two-thread
+test harness does not have production's single thread. The HTTP threads only block on
+`future.get(5000)`.
+
+**The three decisions taken on 2026-09-13, with their reasons:**
+
+1. **Expressions are inside the serialised job, not left to fall where they may.** They are a third
+   cursor-scoped hop one flush after the notes. Previously they were scheduled from inside
+   `writeNotesToCursor` and fired *after* a chain had already selected the next clip, so a
+   `buildSection` clip's expressions landed on its successor — the same wrong-slot defect one layer
+   down. The job now re-verifies the cursor before applying them and does not advance to the next
+   clip until they have been applied.
+2. **`buildSection` aborts on the first mismatch** and reports `landed=[…] notWritten=[…]`. The
+   alternative — carrying on — is the phase's own "nothing gets destroyed without being asked",
+   violated once per remaining clip. A caller can re-issue the clips named in `notWritten`.
+3. **Numeric codes (`-32011`, `-32012`), not `-32001` with two message symbols.** The engine's five
+   existing application-level refusals use `-32001` plus an `UPPER_SNAKE` message, and matching that
+   convention was the alternative. It was rejected because the tool layer's own refusal vocabulary
+   is already string-slug-based: a numeric discriminator on `error.code` is the one distinction the
+   engine can add that the slugs cannot express, and telling a cursor mismatch from a broken write
+   is precisely what D-23-07 asked the operator to be able to do. The cost is two constants and the
+   admission that the five `-32001` sites arguably should have been numbered too; that is not
+   reopened here.
+
+**Option B, and what was deferred.** Delivering the refusal in the RPC *response* requires an RPC
+response that can be completed after its handler returns — `JsonRpcDispatcher`, `CommandQueue` /
+`RpcCommand`, and the notification/batch and `session/transaction` paths that all 953 engine tests
+sit on. That is **Phase 29 (Engine — Deferrable RPC Responses)**, sequenced deliberately after this
+plan rather than bundled into it: this plan proves the verified write path against real Bitwig, and
+Phase 29 then changes only how the answer travels back, on top of a path already confirmed live. A
+large change to the RPC core inside a remediation phase whose premise was small and bisectable is
+the mistake the engine-phase split exists to avoid.
+
+**`PinnableCursorClip#isPinned()` is an UNPROBED hardening option and must not gate any of the
+above.** `createLauncherCursorClip` returns `PinnableCursorClip` (`:8832`) and `PinnableCursor`
+declares `SettableBooleanValue isPinned()` (`:16186-16196`); pinning after the phase-1 selection
+and unpinning after the write would close the *user-click* half of the race. Two things are
+unmeasured anywhere in this tree: whether a set on `isPinned()` takes effect within the flush it is
+issued in, and whether a pinned cursor clip still follows a programmatic `slot.select()`. Note also
+that `SecondoExtension.java:109` declares the cursor clip as a bare `Clip`, discarding the pinnable
+type. The probe belongs to live session 1. Until it has been done this is a note, not a plan.
+
 ### `macro/buildSection`
 
 Build a song section: create/rename a scene and write clips across multiple tracks.
