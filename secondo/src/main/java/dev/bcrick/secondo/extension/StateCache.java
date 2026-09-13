@@ -168,6 +168,29 @@ public class StateCache {
     private volatile double clipLoopStart;
     private final float[] clipColor = new float[3];
 
+    // Where the cursor clip actually IS, absolutely (Phase 23, plan 23-08, TODO-WRONG-SLOT).
+    //
+    // Both are ABSOLUTE project coordinates, not bank-relative: Track#position() is "the position
+    // of the track within the list of Bitwig Studio tracks" and ClipLauncherSlotOrScene#sceneIndex()
+    // is "the position of the scene within the list of Bitwig Studio scenes". That is what makes
+    // them comparable to the (trackIndex, sceneIndex) a macro/writeClip caller names.
+    //
+    // -1 means NEVER OBSERVED, and is deliberately not 0: 0 is a real slot, and a fix whose
+    // "unknown" reads as a valid coordinate would write to track 0 scene 0 whenever the observers
+    // had not fired yet. MacroHandler treats -1 as a mismatch and re-polls.
+    private volatile int clipCursorTrackPosition = -1;
+    private volatile int clipCursorSceneIndex = -1;
+
+    // The refusal counter and the last refusal, published in the clip snapshot section.
+    //
+    // This exists because at this pin the refusal CANNOT travel in the RPC response (see
+    // JsonRpcError.CURSOR_MISMATCH). host.errorln alone would put it in a console the owner has to
+    // have been watching; a counter in the snapshot is retrievable after the fact, which is what
+    // "a bounded result has to announce its boundary" needs to mean when the boundary is hit
+    // asynchronously. Phase 29 makes the response carry it; this stays as the session tally.
+    private volatile int writeClipRefusals;
+    private volatile JsonObject lastWriteClipRefusal;
+
     // Arranger cursor clip state (D-06). Deliberately NOT a copy of the launcher block above:
     //
     //  * `exists` is FIRST and is the load-bearing field. It is the only member of the interface
@@ -664,6 +687,23 @@ public class StateCache {
     public void registerClipCursorObservers(Clip cursorClip, CursorTrack cursorTrack) {
         // Cursor track name (reuse existing field)
         cursorTrack.name().addValueObserver((StringValueChangedCallback) v -> clipTrackName = (String) v);
+
+        // Where this cursor clip IS -- the absolute (track, scene) it currently sits on.
+        //
+        // Same shape as registerArrangerClipCursorObservers' getTrack().name() below, one clip
+        // object over: Clip#getTrack() (API v1) -> Track#position() (API v2), and
+        // Clip#clipLauncherSlot() (API v10) -> ClipLauncherSlotOrScene#sceneIndex() (API v2).
+        // Nothing observed these before; MacroHandler's verify-before-write is their only reader.
+        //
+        // They are subject to the same ~flush-cycle latency as every other observer here -- that
+        // latency IS the wrong-slot bug -- which is why the reader re-polls to a ceiling rather
+        // than trusting one read.
+        Track cursorClipTrack = cursorClip.getTrack();
+        cursorClipTrack.position().markInterested();
+        cursorClipTrack.position().addValueObserver((IntegerValueChangedCallback) v -> clipCursorTrackPosition = v);
+
+        cursorClip.clipLauncherSlot().sceneIndex().markInterested();
+        cursorClip.clipLauncherSlot().sceneIndex().addValueObserver((IntegerValueChangedCallback) v -> clipCursorSceneIndex = v);
 
         // Playing step
         cursorClip.playingStep().markInterested();
@@ -1204,6 +1244,60 @@ public class StateCache {
         return clipStepSize;
     }
 
+    /**
+     * The absolute track position the launcher cursor clip is currently observed on, or
+     * {@code -1} if the observer has never fired.
+     *
+     * <p>Callers must treat {@code -1} as "do not write" rather than as track 0. See the field's
+     * own comment for why the sentinel is not 0.
+     */
+    public int getClipCursorTrackPosition() {
+        return clipCursorTrackPosition;
+    }
+
+    /**
+     * The absolute scene index the launcher cursor clip is currently observed on, or {@code -1}
+     * if the observer has never fired.
+     */
+    public int getClipCursorSceneIndex() {
+        return clipCursorSceneIndex;
+    }
+
+    /** How many launcher writes have been refused this session. */
+    public int getWriteClipRefusals() {
+        return writeClipRefusals;
+    }
+
+    /** The last refusal detail, or null if nothing has been refused this session. */
+    public JsonObject getLastWriteClipRefusal() {
+        return lastWriteClipRefusal;
+    }
+
+    /**
+     * Record a refused or failed launcher write so it is retrievable from a snapshot after the
+     * fact, not only from whichever console happened to be open when it occurred.
+     *
+     * <p>Both the mismatch case ({@code CURSOR_MISMATCH}) and the write-failure case
+     * ({@code NOTE_WRITE_FAILED}) land here, distinguished by {@code code}: a caller that only
+     * counted mismatches would under-report exactly the writes that silently lost notes.
+     */
+    public void recordWriteClipRefusal(String timestamp, String method, int code, String marker,
+                                       int requestedTrack, int requestedScene,
+                                       int observedTrack, int observedScene, int noteCount) {
+        JsonObject detail = new JsonObject();
+        detail.addProperty("timestamp", timestamp);
+        detail.addProperty("method", method);
+        detail.addProperty("code", code);
+        detail.addProperty("marker", marker);
+        detail.addProperty("requestedTrack", requestedTrack);
+        detail.addProperty("requestedScene", requestedScene);
+        detail.addProperty("observedTrack", observedTrack);
+        detail.addProperty("observedScene", observedScene);
+        detail.addProperty("noteCount", noteCount);
+        this.lastWriteClipRefusal = detail;
+        this.writeClipRefusals = writeClipRefusals + 1;
+    }
+
     public boolean clipHasContent(int trackIndex, int slotIndex) {
         if (trackIndex < 0 || trackIndex >= TRACK_COUNT || slotIndex < 0 || slotIndex >= SCENE_COUNT) {
             return false;
@@ -1649,6 +1743,12 @@ public class StateCache {
         obj.addProperty("useLoopStartAsQuantizationReference", clipUseLoopStartAsQuantizationReference);
         obj.addProperty("isLoopEnabled", clipLoopEnabled);
         obj.addProperty("loopStart", clipLoopStart);
+        // Refused launcher writes, this session (Phase 23, plan 23-08). `lastWriteClipRefusal` is
+        // JSON null until something is refused -- an absent key and a null-valued key read the
+        // same to a caller that checks for content, and a stable key set is easier to mirror.
+        obj.addProperty("writeClipRefusals", writeClipRefusals);
+        JsonObject lastRefusal = lastWriteClipRefusal;
+        obj.add("lastWriteClipRefusal", lastRefusal == null ? JsonNull.INSTANCE : lastRefusal);
         JsonObject color = new JsonObject();
         color.addProperty("r", clipColor[0]);
         color.addProperty("g", clipColor[1]);

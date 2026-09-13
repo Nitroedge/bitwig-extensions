@@ -3202,6 +3202,50 @@ Extended note object fields for `macro/writeClip`:
 | `occurrence` | string | no | Condition enum |
 | `recurrence` | object | no | `{length, mask}` |
 
+#### What a successful response means (read this before trusting `count`)
+
+**`ok` means the write was ACCEPTED AND QUEUED. It does not mean the notes have landed.**
+
+The returned `count` is how many notes were accepted, not how many were written. The write is
+carried out one or more flush cycles later, and before any note is written the engine compares the
+cursor clip's own observed absolute position — `Clip#getTrack().position()` and
+`Clip#clipLauncherSlot().sceneIndex()` — against the `(trackIndex, sceneIndex)` you named. It
+re-reads that position every 100 ms up to a 250 ms ceiling, because the observers are themselves on
+the flush cycle and one read can be a flush stale.
+
+- **On a match:** the notes are written, then their expressions one flush later, with the position
+  checked again first.
+- **On a mismatch at the ceiling:** the write is **REFUSED**. Nothing is written — not to the slot
+  you named and not to the slot the cursor was on. It is never retried onto a different slot and
+  never written with a warning.
+
+**Where a refusal shows up.** Not in this response — see the note on `-32011` below. Two places,
+both retrievable after the fact:
+
+1. **Bitwig's Controller Script Console** (`View → Controller Script Console`, or the extension's
+   log for Secondo). Search for the literal marker `SECONDO-CURSOR-MISMATCH`, or
+   `SECONDO-NOTE-WRITE-FAILED` for a correctly-targeted write that failed anyway. Each line carries
+   an ISO-8601 timestamp, the requested and observed positions, and the note count.
+2. **`session/snapshot`**, in the `clip` section: `writeClipRefusals` (how many writes have been
+   refused this session) and `lastWriteClipRefusal` (`{timestamp, method, code, marker,
+   requestedTrack, requestedScene, observedTrack, observedScene, noteCount}`, or `null` if nothing
+   has been refused). A caller that wants to confirm a write landed can read `writeClipRefusals`
+   before and after.
+
+**On `-32011` / `-32012`.** `JsonRpcError.CURSOR_MISMATCH = -32011` and
+`NOTE_WRITE_FAILED = -32012` are declared in the engine but are **not reachable in a response at
+this build**. A handler runs inside Bitwig's `flush()` on the Control Surface Session thread and
+`host.scheduleTask` schedules onto that same thread, so a handler cannot wait for its own deferred
+verify without blocking the flush the verify needs — the response has already been sent by the time
+the outcome is known. Making an RPC response completable after its handler returns is **Phase 29
+(Engine — Deferrable RPC Responses)**; that is what will carry these codes in the `error` object.
+The numbers are declared now so they are pinned before any client depends on them.
+
+**Writes are serialised.** A second `macro/writeClip` or `macro/buildSection` does not create its
+clips or move the cursor until the write in front of it has finished its last cursor-scoped step,
+expressions included. This removes the case where write N+1's cursor move lands inside write N's
+verify window.
+
 ### `macro/buildSection`
 
 Build a song section: create/rename a scene and write clips across multiple tracks.
@@ -3211,6 +3255,19 @@ Build a song section: create/rename a scene and write clips across multiple trac
 | `sceneName` | string | yes | Name for the scene |
 | `sceneIndex` | integer | no | Explicit scene slot index (0-4). Omit to auto-create |
 | `clips` | array | yes | Array of clip definitions with `{trackIndex, lengthBeats, stepSize, notes, name?}` |
+
+#### What a successful response means
+
+Identical to `macro/writeClip` above, and for the same reasons: `ok` with a `clipCount` means the
+chain was accepted and queued, not that the clips were written. Each clip in the chain is verified
+against the cursor clip's observed position before its notes are written.
+
+**A mismatch ABORTS the rest of the chain.** Clips after the failing one are left untouched rather
+than written to whatever the cursor drifted onto, and the console line names both halves —
+`landed=[t0s2,t1s2] notWritten=[t2s2,t3s2]` — so it is clear which clips exist and which were never
+attempted. The parameter validation errors (a clip missing `trackIndex`, an empty `clips` array)
+are still returned in the response as `INVALID_PARAMS`; it is only the post-acceptance outcome that
+travels by log and snapshot until Phase 29.
 
 ### `macro/setupScenes`
 

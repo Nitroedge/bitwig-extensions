@@ -77,6 +77,26 @@ public class StateCacheTestHelper {
         }
     }
 
+    /**
+     * Sets the two fields that record where the launcher cursor clip IS -- what
+     * {@code registerClipCursorObservers} writes from {@code Clip#getTrack().position()} and
+     * {@code Clip#clipLauncherSlot().sceneIndex()} in a running Bitwig.
+     *
+     * <p>A test in this package sets what an observer would because there is no other way to
+     * express the bug these fields exist to stop: the wrong-slot write happens when the cursor is
+     * somewhere other than the slot a write named, and without a settable cursor position a test
+     * can only ever exercise the case where they agree. Public, unlike most of this class, because
+     * the handler tests that need it live in {@code dev.bcrick.secondo.handlers} -- the same
+     * reason {@link #sceneCountOf(Class)} is public.
+     *
+     * <p>Pass {@code -1} for either to model "never observed", which is the state a fresh
+     * {@link StateCache} is in and which the handler must treat as "do not write".
+     */
+    public static void setClipCursorPosition(StateCache cache, int trackPosition, int sceneIndex) {
+        setField(cache, "clipCursorTrackPosition", trackPosition);
+        setField(cache, "clipCursorSceneIndex", sceneIndex);
+    }
+
     static void setField(StateCache cache, String fieldName, Object value) {
         try {
             Field field = StateCache.class.getDeclaredField(fieldName);

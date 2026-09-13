@@ -222,7 +222,7 @@ public class SecondoExtension extends ControllerExtension {
         new GrooveHandler(groove).register(dispatcher);
         new MixerHandler(mixer).register(dispatcher);
         new DetailEditorHandler(detailEditor).register(dispatcher);
-        new MacroHandler(dispatcher, stateCache, host::scheduleTask).register(dispatcher);
+        new MacroHandler(dispatcher, stateCache, host::scheduleTask, host::errorln).register(dispatcher);
 
         // Start servers
         try {

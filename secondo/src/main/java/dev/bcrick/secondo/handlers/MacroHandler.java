@@ -3,13 +3,84 @@ package dev.bcrick.secondo.handlers;
 import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
+import dev.bcrick.secondo.rpc.JsonRpcError;
 import dev.bcrick.secondo.rpc.TaskScheduler;
+
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.List;
+import java.util.function.Consumer;
 
 import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
 
+/**
+ * The multi-step macros: create a track, write a clip, build a section.
+ *
+ * <h2>Why the launcher writes are deferred, verified, and queued</h2>
+ *
+ * <p>There is no non-cursor note-writing surface at API v25. {@code ClipLauncherSlot} carries no
+ * note, step or {@code Clip} accessor, the only launcher {@code Clip} factory is
+ * {@code CursorTrack#createLauncherCursorClip}, and {@code CursorClip#selectClip(Clip)} can only
+ * re-point at a {@code Clip} you already hold. So writing notes to slot (t, s) means moving the
+ * ONE cursor clip there and writing to the cursor -- and the cursor moves on the flush cycle,
+ * not on the call.
+ *
+ * <p>That gap is where notes used to land on the wrong slot (TODO-WRONG-SLOT / P-C-05): phase 2
+ * wrote to whatever the cursor happened to be by then. It now compares the caller's
+ * (trackIndex, sceneIndex) against the cursor clip's OWN observed absolute position
+ * ({@code StateCache#getClipCursorTrackPosition()} / {@code #getClipCursorSceneIndex()}),
+ * re-polls to {@link #CURSOR_VERIFY_CEILING_MS}, and writes only on a match. A mismatch is
+ * refused -- never retried onto a different slot, never written with a warning.
+ *
+ * <h2>What {@code ok} means here, exactly</h2>
+ *
+ * <p>{@code macro/writeClip} returns when the write has been ACCEPTED AND QUEUED, not when the
+ * notes have landed. It cannot do better at this pin, and the reason is structural rather than a
+ * matter of effort: handlers execute inside Bitwig's {@code flush()} on the Control Surface
+ * Session thread ({@code CommandQueue.java:20-22}), and {@code host.scheduleTask} schedules onto
+ * that SAME thread. A handler that blocked on its own deferred verify would block the flush that
+ * the verify is waiting for -- a deadlock, not a slow path. Making the RPC response itself
+ * completable after the handler returns is Phase 29 ("Engine: Deferrable RPC Responses"), which
+ * will emit {@link JsonRpcError#CURSOR_MISMATCH} / {@link JsonRpcError#NOTE_WRITE_FAILED} in the
+ * response. Until then a refusal is announced two ways, both retrievable:
+ *
+ * <ul>
+ *   <li>a {@code host.errorln} line marked {@value #MARKER_CURSOR_MISMATCH} or
+ *       {@value #MARKER_NOTE_WRITE_FAILED}, with an ISO-8601 timestamp and both positions; and</li>
+ *   <li>{@code writeClipRefusals} / {@code lastWriteClipRefusal} in the snapshot's clip section.</li>
+ * </ul>
+ *
+ * <h2>Serialisation</h2>
+ *
+ * <p>Writes are queued, and the queue advances only when a write's LAST cursor-scoped step has
+ * run -- including the expression hop. Write N+1's clip creation and cursor move therefore cannot
+ * begin inside write N's verify window, which is the race the queue exists to remove. The queue
+ * is a plain {@link ArrayDeque} with no synchronisation, deliberately: every path that touches it
+ * runs on the one Control Surface Session thread named above.
+ */
 public class MacroHandler {
 
     private static final long FLUSH_DELAY_MS = 100;
+
+    /**
+     * How long the verify may keep re-reading the cursor position before refusing the write.
+     *
+     * <p>The observers this reads are themselves on the flush cycle, so a single read taken at
+     * {@code FLUSH_DELAY_MS} can be one flush stale -- re-polling is load-bearing, not
+     * belt-and-braces. 250 ms against P-C-13's measured cursor-position figures (stale at ~35 ms,
+     * fresh at ~80-89 ms) leaves room for a slow flush without letting a genuinely wrong cursor
+     * sit unexamined. With checks every {@code FLUSH_DELAY_MS} that is two observations, at
+     * ~100 ms and ~200 ms.
+     *
+     * <p>Exhausting it REFUSES. It is not a timeout after which the write proceeds hopefully.
+     */
+    private static final long CURSOR_VERIFY_CEILING_MS = 250;
+
+    /** Greppable marker for a refused launcher write. Do not reword: the docs tell owners to search for it. */
+    static final String MARKER_CURSOR_MISMATCH = "SECONDO-CURSOR-MISMATCH";
+
+    /** Greppable marker for a launcher write that was correctly targeted and still failed. */
+    static final String MARKER_NOTE_WRITE_FAILED = "SECONDO-NOTE-WRITE-FAILED";
 
     /**
      * The scene bank window width, used by {@link #handleBuildSection} to convert an absolute
@@ -30,11 +101,35 @@ public class MacroHandler {
     private final JsonRpcDispatcher dispatcher;
     private final StateCache stateCache;
     private final TaskScheduler scheduler;
+    private final Consumer<String> errorLog;
 
-    public MacroHandler(JsonRpcDispatcher dispatcher, StateCache stateCache, TaskScheduler scheduler) {
+    /** Queued launcher writes. Drained one at a time; see the class comment on serialisation. */
+    private final Deque<WriteJob> writeQueue = new ArrayDeque<>();
+    private boolean writeInProgress;
+
+    /**
+     * The production constructor.
+     *
+     * @param errorLog where a refused or failed write is announced -- {@code host::errorln} in the
+     *                 extension, so the line reaches Bitwig's Controller Script Console.
+     */
+    public MacroHandler(JsonRpcDispatcher dispatcher, StateCache stateCache, TaskScheduler scheduler,
+                        Consumer<String> errorLog) {
         this.dispatcher = dispatcher;
         this.stateCache = stateCache;
         this.scheduler = scheduler;
+        this.errorLog = errorLog != null ? errorLog : message -> { };
+    }
+
+    /**
+     * Kept for callers that have no host to log through.
+     *
+     * <p>Refusals still COUNT (they reach {@code StateCache}); they are simply not printed. This
+     * overload exists so a test or an embedding that has no {@code ControllerHost} is not forced
+     * to invent one, not as a way to opt out of the announcement.
+     */
+    public MacroHandler(JsonRpcDispatcher dispatcher, StateCache stateCache, TaskScheduler scheduler) {
+        this(dispatcher, stateCache, scheduler, null);
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -160,18 +255,16 @@ public class MacroHandler {
         String name = params.has("name") && !params.get("name").isJsonNull()
             ? params.get("name").getAsString() : null;
 
-        // Phase 1 (this flush cycle): create clip and request cursor move
-        createClip(trackIndex, sceneIndex, lengthBeats);
-        forceSelectClip(trackIndex, sceneIndex);
-
-        // Phase 2 (next flush cycle): cursor has followed, now write notes
-        scheduler.schedule(() -> {
-            try {
-                writeNotesToCursor(stepSize, notes, name);
-            } catch (Exception e) {
-                // Deferred write failed — logged but not propagated to caller
-            }
-        }, FLUSH_DELAY_MS);
+        // Queue the whole write -- clip creation, cursor move, verify, notes, expressions -- as one
+        // job. Phase 1 runs inside the job rather than here so that a second writeClip arriving in
+        // the same flush cannot move the cursor out from under a write already in its verify
+        // window. See the class comment.
+        //
+        // The response reports how many notes were ACCEPTED. It does not and cannot report that
+        // they landed; rpc-api-reference.md says so in those words, and Phase 29 is what changes
+        // it. Do not add a field here claiming otherwise.
+        enqueueWrite(new WriteJob("macro/writeClip",
+            List.of(new ClipWrite(trackIndex, sceneIndex, lengthBeats, stepSize, notes, name))));
 
         JsonObject result = new JsonObject();
         result.addProperty("count", notes.size());
@@ -223,45 +316,26 @@ public class MacroHandler {
             dispatcher.handleInternal("scene/rename", renameParams);
         }
 
-        // Phase 1 (this flush cycle): create all clips and select the first one
+        // Validate every clip up front, then queue the chain as ONE job. Validation stays here, in
+        // the handler, so a malformed clip is still an INVALID_PARAMS error in the response rather
+        // than a log line the caller never sees.
+        java.util.List<ClipWrite> chain = new java.util.ArrayList<>();
         for (JsonElement clipEl : clips) {
             JsonObject clip = clipEl.getAsJsonObject();
-            int trackIndex = requireInt(clip, "trackIndex");
-            int lengthBeats = requireInt(clip, "lengthBeats");
-            createClip(trackIndex, slotIndex, lengthBeats);
+            chain.add(new ClipWrite(
+                requireInt(clip, "trackIndex"),
+                slotIndex,
+                requireInt(clip, "lengthBeats"),
+                requireDouble(clip, "stepSize"),
+                requireArray(clip, "notes"),
+                clip.has("name") && !clip.get("name").isJsonNull()
+                    ? clip.get("name").getAsString() : null));
         }
 
-        // Select the first clip — cursor will follow in next flush cycle
-        JsonObject firstClip = clips.get(0).getAsJsonObject();
-        forceSelectClip(requireInt(firstClip, "trackIndex"), slotIndex);
-
-        // Phase 2+: chain clip writes across flush cycles
-        // Each clip needs: (flush N) write notes + select next clip → (flush N+1) write next
-        for (int i = 0; i < clips.size(); i++) {
-            JsonObject clip = clips.get(i).getAsJsonObject();
-            double stepSize = requireDouble(clip, "stepSize");
-            JsonArray notes = requireArray(clip, "notes");
-            String clipName = clip.has("name") && !clip.get("name").isJsonNull()
-                ? clip.get("name").getAsString() : null;
-
-            boolean isLast = (i == clips.size() - 1);
-            int nextClipTrackIndex = isLast ? -1
-                : requireInt(clips.get(i + 1).getAsJsonObject(), "trackIndex");
-
-            long writeDelay = FLUSH_DELAY_MS * (2L * i + 1);
-            final int sceneIdx = slotIndex;
-            final int nextTrack = nextClipTrackIndex;
-            scheduler.schedule(() -> {
-                try {
-                    writeNotesToCursor(stepSize, notes, clipName);
-                    if (nextTrack >= 0) {
-                        forceSelectClip(nextTrack, sceneIdx);
-                    }
-                } catch (Exception e) {
-                    // Deferred write failed
-                }
-            }, writeDelay);
-        }
+        // The chain is verified per clip and ABORTS on the first mismatch: clips after the failing
+        // one are left untouched and reported as notWritten. The alternative -- carrying on -- is
+        // exactly "something got destroyed without being asked", n-1 times over.
+        enqueueWrite(new WriteJob("macro/buildSection", chain));
 
         JsonObject result = new JsonObject();
         result.addProperty("sceneIndex", sceneIndexResult);
@@ -637,11 +711,14 @@ public class MacroHandler {
             dispatcher.handleInternal("clip/rename", renameP);
         }
 
-        // Apply expression properties (deferred — notes must exist first)
-        applyNoteExpressions(notes);
+        // Expressions are NOT applied from here any more. They are a third cursor-scoped hop one
+        // flush later, so the job driver schedules them itself and re-verifies the cursor first --
+        // expressions landing on the slot after the one their notes went to is the same wrong-slot
+        // bug one layer down, and it used to happen on every buildSection chain because the next
+        // clip was selected in the same task that scheduled them.
     }
 
-    private void applyNoteExpressions(JsonArray notes) {
+    private ExpressionWork collectNoteExpressions(JsonArray notes) {
         // Collect expression data from notes
         JsonArray chanceNotes = new JsonArray();
         JsonArray repeatNotes = new JsonArray();
@@ -707,46 +784,309 @@ public class MacroHandler {
             }
         }
 
-        // Schedule expression calls if any were collected
         boolean hasExpressions = chanceNotes.size() > 0
             || !expressionsByProperty.isEmpty()
             || repeatNotes.size() > 0
             || occurrenceNotes.size() > 0
             || recurrenceNotes.size() > 0;
 
-        if (!hasExpressions) return;
+        // Null means "nothing to do", which the driver distinguishes from "a hop that must be
+        // verified": a note-only clip finishes without spending a flush cycle it does not need.
+        if (!hasExpressions) return null;
 
-        scheduler.schedule(() -> {
-            try {
-                if (chanceNotes.size() > 0) {
-                    JsonObject p = new JsonObject();
-                    p.add("notes", chanceNotes);
-                    dispatcher.handleInternal("clip/setChance", p);
-                }
-                for (JsonArray exprNotes : expressionsByProperty.values()) {
-                    JsonObject p = new JsonObject();
-                    p.add("notes", exprNotes);
-                    dispatcher.handleInternal("clip/setNoteExpressions", p);
-                }
-                if (repeatNotes.size() > 0) {
-                    JsonObject p = new JsonObject();
-                    p.add("notes", repeatNotes);
-                    dispatcher.handleInternal("clip/setNoteRepeat", p);
-                }
-                if (occurrenceNotes.size() > 0) {
-                    JsonObject p = new JsonObject();
-                    p.add("notes", occurrenceNotes);
-                    dispatcher.handleInternal("clip/setNoteOccurrence", p);
-                }
-                if (recurrenceNotes.size() > 0) {
-                    JsonObject p = new JsonObject();
-                    p.add("notes", recurrenceNotes);
-                    dispatcher.handleInternal("clip/setNoteRecurrence", p);
-                }
-            } catch (Exception e) {
-                // Deferred expression application failed
+        return new ExpressionWork(chanceNotes, expressionsByProperty,
+            repeatNotes, occurrenceNotes, recurrenceNotes);
+    }
+
+    private void applyNoteExpressions(ExpressionWork work) throws Exception {
+        if (work.chanceNotes.size() > 0) {
+            JsonObject p = new JsonObject();
+            p.add("notes", work.chanceNotes);
+            dispatcher.handleInternal("clip/setChance", p);
+        }
+        for (JsonArray exprNotes : work.expressionsByProperty.values()) {
+            JsonObject p = new JsonObject();
+            p.add("notes", exprNotes);
+            dispatcher.handleInternal("clip/setNoteExpressions", p);
+        }
+        if (work.repeatNotes.size() > 0) {
+            JsonObject p = new JsonObject();
+            p.add("notes", work.repeatNotes);
+            dispatcher.handleInternal("clip/setNoteRepeat", p);
+        }
+        if (work.occurrenceNotes.size() > 0) {
+            JsonObject p = new JsonObject();
+            p.add("notes", work.occurrenceNotes);
+            dispatcher.handleInternal("clip/setNoteOccurrence", p);
+        }
+        if (work.recurrenceNotes.size() > 0) {
+            JsonObject p = new JsonObject();
+            p.add("notes", work.recurrenceNotes);
+            dispatcher.handleInternal("clip/setNoteRecurrence", p);
+        }
+    }
+
+    // --- The verified, serialised launcher write ---
+
+    /** One clip's worth of write instructions, with the absolute slot it is FOR. */
+    private static final class ClipWrite {
+        final int trackIndex;
+        final int sceneIndex;
+        final int lengthBeats;
+        final double stepSize;
+        final JsonArray notes;
+        final String name;
+
+        ClipWrite(int trackIndex, int sceneIndex, int lengthBeats, double stepSize,
+                  JsonArray notes, String name) {
+            this.trackIndex = trackIndex;
+            this.sceneIndex = sceneIndex;
+            this.lengthBeats = lengthBeats;
+            this.stepSize = stepSize;
+            this.notes = notes;
+            this.name = name;
+        }
+
+        String label() {
+            return "t" + trackIndex + "s" + sceneIndex;
+        }
+    }
+
+    /** One queued write: a single clip for {@code macro/writeClip}, a chain for {@code buildSection}. */
+    private static final class WriteJob {
+        final String method;
+        final List<ClipWrite> clips;
+        final JsonArray landed = new JsonArray();
+        int index;
+
+        WriteJob(String method, List<ClipWrite> clips) {
+            this.method = method;
+            this.clips = clips;
+        }
+    }
+
+    /** Expression calls collected from a clip's notes, ready to dispatch one flush later. */
+    private static final class ExpressionWork {
+        final JsonArray chanceNotes;
+        final java.util.Map<String, JsonArray> expressionsByProperty;
+        final JsonArray repeatNotes;
+        final JsonArray occurrenceNotes;
+        final JsonArray recurrenceNotes;
+
+        ExpressionWork(JsonArray chanceNotes, java.util.Map<String, JsonArray> expressionsByProperty,
+                       JsonArray repeatNotes, JsonArray occurrenceNotes, JsonArray recurrenceNotes) {
+            this.chanceNotes = chanceNotes;
+            this.expressionsByProperty = expressionsByProperty;
+            this.repeatNotes = repeatNotes;
+            this.occurrenceNotes = occurrenceNotes;
+            this.recurrenceNotes = recurrenceNotes;
+        }
+    }
+
+    private void enqueueWrite(WriteJob job) {
+        writeQueue.add(job);
+        if (!writeInProgress) {
+            startNextJob();
+        }
+    }
+
+    private void startNextJob() {
+        WriteJob job = writeQueue.poll();
+        if (job == null) {
+            writeInProgress = false;
+            return;
+        }
+        writeInProgress = true;
+
+        // Phase 1: create every clip of the job, then move the cursor to the first one. Both are
+        // cursor-affecting, so both belong inside the serialised job rather than in the handler.
+        try {
+            for (ClipWrite clip : job.clips) {
+                createClip(clip.trackIndex, clip.sceneIndex, clip.lengthBeats);
             }
+            ClipWrite first = job.clips.get(0);
+            forceSelectClip(first.trackIndex, first.sceneIndex);
+        } catch (Exception e) {
+            failJob(job, job.clips.get(0), e);
+            return;
+        }
+
+        scheduler.schedule(() -> verifyThenWrite(job, FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+    }
+
+    /**
+     * Phase 2: compare where the cursor clip actually is against the slot this clip was named for,
+     * and write only if they agree.
+     *
+     * @param elapsedMs how long has been spent waiting for the cursor, against
+     *                  {@link #CURSOR_VERIFY_CEILING_MS}
+     */
+    private void verifyThenWrite(WriteJob job, long elapsedMs) {
+        ClipWrite clip = job.clips.get(job.index);
+        int observedTrack = stateCache.getClipCursorTrackPosition();
+        int observedScene = stateCache.getClipCursorSceneIndex();
+
+        if (observedTrack != clip.trackIndex || observedScene != clip.sceneIndex) {
+            if (elapsedMs + FLUSH_DELAY_MS <= CURSOR_VERIFY_CEILING_MS) {
+                // Possibly just a stale observer; give the flush cycle another go.
+                scheduler.schedule(() -> verifyThenWrite(job, elapsedMs + FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+            } else {
+                refuseJob(job, clip, observedTrack, observedScene, elapsedMs);
+            }
+            return;
+        }
+
+        try {
+            writeNotesToCursor(clip.stepSize, clip.notes, clip.name);
+        } catch (Exception e) {
+            failJob(job, clip, e);
+            return;
+        }
+
+        ExpressionWork work = collectNoteExpressions(clip.notes);
+        if (work == null) {
+            advance(job, clip, "none");
+            return;
+        }
+
+        // Phase 3: expressions, one flush later, re-verified. No re-poll here -- nothing of ours
+        // moves the cursor while a job is in flight, so a mismatch at this point is the user or
+        // another surface moving it, and waiting would not make it come back.
+        scheduler.schedule(() -> {
+            int exprTrack = stateCache.getClipCursorTrackPosition();
+            int exprScene = stateCache.getClipCursorSceneIndex();
+            if (exprTrack != clip.trackIndex || exprScene != clip.sceneIndex) {
+                refuseExpressions(job, clip, exprTrack, exprScene);
+                return;
+            }
+            try {
+                applyNoteExpressions(work);
+            } catch (Exception e) {
+                failJob(job, clip, e);
+                return;
+            }
+            advance(job, clip, "applied");
         }, FLUSH_DELAY_MS);
+    }
+
+    /** This clip is done; move to the next one, or finish the job. */
+    private void advance(WriteJob job, ClipWrite clip, String expressionsState) {
+        job.landed.add(describe(clip, expressionsState));
+        job.index++;
+
+        if (job.index >= job.clips.size()) {
+            finishJob(job);
+            return;
+        }
+
+        ClipWrite next = job.clips.get(job.index);
+        try {
+            forceSelectClip(next.trackIndex, next.sceneIndex);
+        } catch (Exception e) {
+            failJob(job, next, e);
+            return;
+        }
+        scheduler.schedule(() -> verifyThenWrite(job, FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+    }
+
+    private void finishJob(WriteJob job) {
+        writeInProgress = false;
+        startNextJob();
+    }
+
+    private void refuseJob(WriteJob job, ClipWrite clip, int observedTrack, int observedScene,
+                           long elapsedMs) {
+        String timestamp = java.time.Instant.now().toString();
+        stateCache.recordWriteClipRefusal(timestamp, job.method, JsonRpcError.CURSOR_MISMATCH,
+            MARKER_CURSOR_MISMATCH, clip.trackIndex, clip.sceneIndex, observedTrack, observedScene,
+            clip.notes.size());
+
+        errorLog.accept(MARKER_CURSOR_MISMATCH + " " + timestamp + " " + job.method
+            + " code=" + JsonRpcError.CURSOR_MISMATCH
+            + " requested=" + clip.label()
+            + " observed=" + position(observedTrack, observedScene)
+            + " notes=" + clip.notes.size()
+            + " ceilingMs=" + CURSOR_VERIFY_CEILING_MS
+            + " waitedMs=" + elapsedMs
+            + " — REFUSED: the cursor clip was not on the slot this write named, so nothing was"
+            + " written. No slot was modified." + chainSummary(job));
+        finishJob(job);
+    }
+
+    private void refuseExpressions(WriteJob job, ClipWrite clip, int observedTrack, int observedScene) {
+        String timestamp = java.time.Instant.now().toString();
+        stateCache.recordWriteClipRefusal(timestamp, job.method, JsonRpcError.CURSOR_MISMATCH,
+            MARKER_CURSOR_MISMATCH, clip.trackIndex, clip.sceneIndex, observedTrack, observedScene,
+            clip.notes.size());
+
+        errorLog.accept(MARKER_CURSOR_MISMATCH + " " + timestamp + " " + job.method
+            + " code=" + JsonRpcError.CURSOR_MISMATCH
+            + " requested=" + clip.label()
+            + " observed=" + position(observedTrack, observedScene)
+            + " notes=" + clip.notes.size()
+            + " — the notes landed on " + clip.label() + " but the cursor moved before their"
+            + " expressions could be applied, so the EXPRESSIONS were refused rather than written"
+            + " to the wrong clip." + chainSummary(job));
+
+        // The notes themselves did land; say so, and stop the chain.
+        job.landed.add(describe(clip, "refused"));
+        job.index++;
+        finishJob(job);
+    }
+
+    private void failJob(WriteJob job, ClipWrite clip, Exception cause) {
+        String timestamp = java.time.Instant.now().toString();
+        String reason = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getName();
+        stateCache.recordWriteClipRefusal(timestamp, job.method, JsonRpcError.NOTE_WRITE_FAILED,
+            MARKER_NOTE_WRITE_FAILED, clip.trackIndex, clip.sceneIndex,
+            stateCache.getClipCursorTrackPosition(), stateCache.getClipCursorSceneIndex(),
+            clip.notes.size());
+
+        errorLog.accept(MARKER_NOTE_WRITE_FAILED + " " + timestamp + " " + job.method
+            + " code=" + JsonRpcError.NOTE_WRITE_FAILED
+            + " requested=" + clip.label()
+            + " notes=" + clip.notes.size()
+            + " — the cursor was on the named slot and the write itself failed: " + reason
+            + chainSummary(job));
+        finishJob(job);
+    }
+
+    /** What landed and what did not, for a chain that stopped partway. Empty for a lone clip. */
+    private String chainSummary(WriteJob job) {
+        if (job.clips.size() < 2) {
+            return "";
+        }
+        StringBuilder notWritten = new StringBuilder();
+        for (int i = job.index; i < job.clips.size(); i++) {
+            if (notWritten.length() > 0) {
+                notWritten.append(",");
+            }
+            notWritten.append(job.clips.get(i).label());
+        }
+        StringBuilder landed = new StringBuilder();
+        for (JsonElement el : job.landed) {
+            if (landed.length() > 0) {
+                landed.append(",");
+            }
+            landed.append(el.getAsJsonObject().get("slot").getAsString());
+        }
+        return " Chain ABORTED: landed=[" + landed + "] notWritten=[" + notWritten + "].";
+    }
+
+    private static JsonObject describe(ClipWrite clip, String expressionsState) {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("slot", clip.label());
+        obj.addProperty("notes", clip.notes.size());
+        obj.addProperty("expressions", expressionsState);
+        return obj;
+    }
+
+    private static String position(int track, int scene) {
+        // -1 is "never observed", and reads as nothing else.
+        if (track < 0 || scene < 0) {
+            return "unobserved(t" + track + "s" + scene + ")";
+        }
+        return "t" + track + "s" + scene;
     }
 
     private void createClip(int trackIndex, int slotIndex, int lengthBeats) throws Exception {

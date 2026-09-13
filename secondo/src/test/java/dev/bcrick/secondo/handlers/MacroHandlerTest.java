@@ -2,6 +2,7 @@ package dev.bcrick.secondo.handlers;
 
 import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
+import dev.bcrick.secondo.extension.StateCacheTestHelper;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import dev.bcrick.secondo.rpc.TaskScheduler;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,6 +17,7 @@ class MacroHandlerTest {
 
     private JsonRpcDispatcher dispatcher;
     private List<String> callLog;
+    private StateCache stateCache;
 
     /** Runs scheduled tasks immediately — simulates instant flush cycles for testing. */
     private static final TaskScheduler IMMEDIATE_SCHEDULER = (task, delayMs) -> task.run();
@@ -24,6 +26,7 @@ class MacroHandlerTest {
     void setUp() {
         dispatcher = new JsonRpcDispatcher();
         callLog = new ArrayList<>();
+        stateCache = new StateCache();
 
         // Register stub handlers that log calls
         dispatcher.register("track/createAudio", params -> {
@@ -54,8 +57,15 @@ class MacroHandlerTest {
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/select", params -> {
-            callLog.add("clip/select:t" + params.get("trackIndex").getAsInt()
-                + "s" + params.get("slotIndex").getAsInt());
+            int trackIndex = params.get("trackIndex").getAsInt();
+            int slotIndex = params.get("slotIndex").getAsInt();
+            callLog.add("clip/select:t" + trackIndex + "s" + slotIndex);
+            // The cursor MOVES when it is selected, and this stub has to say so. Since plan 23-08
+            // the launcher write refuses to write anywhere the cursor clip has not been observed
+            // to be, so a stub that only logged would make every writeClip in this class refuse.
+            // IMMEDIATE_SCHEDULER collapses the flush window to zero, so the move is instant here;
+            // MacroHandlerWrongSlotTest is where the window is a place a test can stand.
+            StateCacheTestHelper.setClipCursorPosition(stateCache, trackIndex, slotIndex);
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/setStepSize", params -> {
@@ -146,7 +156,7 @@ class MacroHandlerTest {
             return new JsonPrimitive("ok");
         });
 
-        new MacroHandler(dispatcher, new StateCache(), IMMEDIATE_SCHEDULER).register(dispatcher);
+        new MacroHandler(dispatcher, stateCache, IMMEDIATE_SCHEDULER).register(dispatcher);
     }
 
     // --- Registration ---
