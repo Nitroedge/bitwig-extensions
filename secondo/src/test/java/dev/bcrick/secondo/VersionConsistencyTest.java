@@ -80,9 +80,12 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.0",
+            "0.2.1",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.0 (secondo decision D-21-H, phase 21). This "
+            "The engine's version is 0.2.1 (secondo decision D-21-H, phase 21; bumped "
+                + "from 0.2.0 by secondo phase 23 plan 23-09 at the sixth pin move, so "
+                + "that diagnose's version row can tell a build carrying the verified "
+                + "launcher write from one that does not). This "
                 + "assertion is not redundant with the agreement test above: that one would stay "
                 + "green if BOTH copies were moved to a value nothing else in the project "
                 + "expects, and the version is compared across a repository boundary -- "
