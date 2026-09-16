@@ -28,7 +28,9 @@ public class WsRpcServer extends WebSocketServer {
     public static final Set<String> VALID_TOPICS = Set.of(
         "transport", "tracks", "scenes", "device", "clip", "master",
         "application", "arranger", "arrangement", "masterDevice",
-        "browser", "arpeggiator", "noteLatch", "groove"
+        "browser", "arpeggiator", "noteLatch", "groove",
+        // Phase 26 (D-26-20): in StateCache.getDelta, so it must be subscribable (D6-DEF-03).
+        "masterChain"
     );
 
     /**

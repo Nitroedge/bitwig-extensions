@@ -116,6 +116,10 @@ public class SecondoExtension extends ControllerExtension {
         CursorDevice masterCursorDevice = masterTrack.createCursorDevice("gig-master-device", 0);
         CursorRemoteControlsPage masterRemoteControlsPage = masterCursorDevice.createCursorRemoteControlsPage(8);
 
+        // Master chain bank (Phase 26, D-26-20): created here because Bitwig permits proxy
+        // factories only during initialization (D-25-20); read through session/snapshot masterChain.
+        DeviceBank masterDeviceBank = masterTrack.createDeviceBank(StateCache.MASTER_CHAIN_BANK_WIDTH);
+
         // Create cursor clip for note editing
         Clip cursorClip = cursorTrack.createLauncherCursorClip("secondo-clip", "Gig Clip",
             CLIP_GRID_WIDTH, CLIP_GRID_HEIGHT);
@@ -173,6 +177,7 @@ public class SecondoExtension extends ControllerExtension {
         stateCache.registerMixerObservers(trackBank);
         stateCache.registerGroupObservers(trackBank);
         stateCache.registerMasterDeviceObservers(masterCursorDevice, masterRemoteControlsPage);
+        stateCache.registerMasterChainObservers(masterDeviceBank);
         stateCache.registerBrowserObservers(popupBrowser);
         stateCache.registerFilterObservers(popupBrowser);
         stateCache.registerNoteInputObservers(arpeggiator, noteLatch);
@@ -230,7 +235,7 @@ public class SecondoExtension extends ControllerExtension {
         new SendHandler(trackBankManager, SEND_COUNT).register(dispatcher);
         new ProjectHandler(project, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);
-        new BrowserHandler(popupBrowser, cursorDevice, stateCache).register(dispatcher);
+        new BrowserHandler(popupBrowser, cursorDevice, masterTrack, masterCursorDevice, stateCache).register(dispatcher);
         new NoteInputHandler(noteInput, arpeggiator, noteLatch, stateCache).register(dispatcher);
         new GrooveHandler(groove).register(dispatcher);
         new MixerHandler(mixer).register(dispatcher);

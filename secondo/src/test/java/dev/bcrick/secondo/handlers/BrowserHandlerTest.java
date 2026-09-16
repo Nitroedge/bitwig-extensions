@@ -5,6 +5,7 @@ import com.bitwig.extension.controller.api.BrowserResultsItemBank;
 import com.bitwig.extension.controller.api.CursorBrowserFilterItem;
 import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.InsertionPoint;
+import com.bitwig.extension.controller.api.MasterTrack;
 import com.bitwig.extension.controller.api.PopupBrowser;
 import com.bitwig.extension.controller.api.SettableBooleanValue;
 import com.bitwig.extension.controller.api.SettableIntegerValue;
@@ -28,6 +29,8 @@ class BrowserHandlerTest {
 
     @Mock private PopupBrowser mockPopupBrowser;
     @Mock private CursorDevice mockCursorDevice;
+    @Mock private MasterTrack mockMasterTrack;
+    @Mock private CursorDevice mockMasterCursorDevice;
     @Mock private StateCache mockStateCache;
 
     // Chain mocks
@@ -67,13 +70,14 @@ class BrowserHandlerTest {
         when(mockStateCache.getResultBankState()).thenReturn(new JsonObject());
 
         dispatcher = new JsonRpcDispatcher();
-        new BrowserHandler(mockPopupBrowser, mockCursorDevice, mockStateCache).register(dispatcher);
+        new BrowserHandler(mockPopupBrowser, mockCursorDevice, mockMasterTrack,
+            mockMasterCursorDevice, mockStateCache).register(dispatcher);
     }
 
     // --- Registration ---
 
     @Test
-    void registersTwentyOneMethods() {
+    void registersTwentyThreeMethods() {
         var methods = dispatcher.getRegisteredMethods();
         // Phase 17 — 11 methods
         assertTrue(methods.contains("browser/browsePresets"));
@@ -98,7 +102,10 @@ class BrowserHandlerTest {
         assertTrue(methods.contains("browser/getFilters"));
         assertTrue(methods.contains("browser/getResults"));
         assertTrue(methods.contains("browser/scrollResults"));
-        assertEquals(21, methods.size());
+        // Phase 26 — 2 master chain openers
+        assertTrue(methods.contains("browser/browseMasterInsertDevice"));
+        assertTrue(methods.contains("browser/browseMasterPresets"));
+        assertEquals(23, methods.size());
     }
 
     // --- setContentType validation ---
@@ -174,6 +181,25 @@ class BrowserHandlerTest {
         when(mockCursorDevice.afterDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("browser/browseInsertDevice", "{}"));
         verify(mockInsertionPoint).browse();
+    }
+
+    @Test
+    void browseMasterInsertDevice_callsMasterTrackEndOfDeviceChainInsertionPointBrowse() {
+        when(mockMasterTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+        String response = dispatcher.handle(rpc("browser/browseMasterInsertDevice", "{}"));
+        assertContains(response, "\"ok\"");
+        verify(mockInsertionPoint).browse();
+        verifyNoInteractions(mockCursorDevice);
+        verifyNoInteractions(mockMasterCursorDevice);
+    }
+
+    @Test
+    void browseMasterPresets_callsMasterCursorDeviceReplaceInsertionPointBrowse() {
+        when(mockMasterCursorDevice.replaceDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
+        String response = dispatcher.handle(rpc("browser/browseMasterPresets", "{}"));
+        assertContains(response, "\"ok\"");
+        verify(mockInsertionPoint).browse();
+        verifyNoInteractions(mockCursorDevice);
     }
 
     // --- Behavioral tests (Mockito) — Result navigation ---

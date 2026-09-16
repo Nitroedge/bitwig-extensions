@@ -311,8 +311,9 @@ class WsRpcServerTest {
     }
 
     @Test
-    void validTopics_containsAll14Sections() {
-        assertEquals(14, WsRpcServer.VALID_TOPICS.size());
+    void validTopics_containsAll15Sections() {
+        assertEquals(15, WsRpcServer.VALID_TOPICS.size());
+        assertTrue(WsRpcServer.VALID_TOPICS.contains("masterChain"));
         assertTrue(WsRpcServer.VALID_TOPICS.contains("transport"));
         assertTrue(WsRpcServer.VALID_TOPICS.contains("groove"));
         assertTrue(WsRpcServer.VALID_TOPICS.contains("masterDevice"));

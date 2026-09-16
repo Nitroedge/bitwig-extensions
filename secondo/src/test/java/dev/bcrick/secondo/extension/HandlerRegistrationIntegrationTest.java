@@ -113,7 +113,7 @@ class HandlerRegistrationIntegrationTest {
         new SendHandler(trackBankManager, 4).register(dispatcher);
         new ProjectHandler(mockProject, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);
-        new BrowserHandler(mockPopupBrowser, mockCursorDevice, stateCache).register(dispatcher);
+        new BrowserHandler(mockPopupBrowser, mockCursorDevice, mockMasterTrack, mockMasterCursorDevice, stateCache).register(dispatcher);
         new NoteInputHandler(mockNoteInput, mockArpeggiator, mockNoteLatch, stateCache).register(dispatcher);
         new DetailEditorHandler(mockDetailEditor).register(dispatcher);
         new MacroHandler(dispatcher, stateCache, IMMEDIATE_SCHEDULER).register(dispatcher);
@@ -140,6 +140,22 @@ class HandlerRegistrationIntegrationTest {
         assertTrue(json.has("result"));
         JsonArray methods = json.getAsJsonArray("result");
         assertEquals(dispatcher.getRegisteredMethods().size(), methods.size());
+    }
+
+    /**
+     * Phase 26's four routes reach api/list through the same wiring init() uses -- including
+     * BrowserHandler's constructor taking the master track and the master cursor device.
+     */
+    @Test
+    void apiListContainsThePhase26Routes() {
+        String response = rpc("api/list", "{}");
+        JsonArray methods = JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonArray("result");
+        for (String name : new String[] {
+                "clip/insertFile", "clip/browseToInsert",
+                "browser/browseMasterInsertDevice", "browser/browseMasterPresets"}) {
+            assertTrue(methods.contains(new JsonPrimitive(name)), "api/list lacks " + name);
+        }
     }
 
     // --- Namespace presence ---

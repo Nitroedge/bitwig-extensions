@@ -18,10 +18,15 @@ import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 import static dev.bcrick.secondo.extension.StateCacheTestHelper.sceneCountOf;
 import static org.junit.jupiter.api.Assertions.*;
@@ -105,12 +110,14 @@ class ClipHandlerTest {
         assertTrue(methods.contains("clip/duplicate"));
         assertTrue(methods.contains("clip/duplicateToSlot"));
         assertTrue(methods.contains("scene/launch"));
+        assertTrue(methods.contains("clip/insertFile"));
+        assertTrue(methods.contains("clip/browseToInsert"));
     }
 
     @Test
-    void registersExactlyThirtyMethods() {
-        // 10 original + 6 launch settings + 14 grid enhancements
-        assertEquals(30, dispatcher.getRegisteredMethods().size());
+    void registersExactlyThirtyTwoMethods() {
+        // 10 original + 6 launch settings + 14 grid enhancements + 2 Phase 26 slot routes
+        assertEquals(32, dispatcher.getRegisteredMethods().size());
     }
 
     @Test
@@ -541,6 +548,125 @@ class ClipHandlerTest {
     void clipDuplicateContent_callsCursorClipDuplicateContent() {
         dispatcher.handle(rpc("clip/duplicateContent", "{}"));
         verify(mockCursorClip).duplicateContent();
+    }
+
+    // --- Phase 26: clip/insertFile and clip/browseToInsert ---
+
+    @TempDir
+    Path clipDir;
+
+    /**
+     * A non-identity canonical mapping (bank slot 1 observed not existing, so public index 1
+     * resolves to bank slot 2) with slot 0 of bank slot 2's track stubbed. Returns that slot.
+     */
+    private ClipLauncherSlot canonicalSlotUnderNonIdentityMapping(JsonRpcDispatcher local,
+                                                                   Track[] slotOneTrackOut) {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        ClipLauncherSlotBank slotTwoBank = mock(ClipLauncherSlotBank.class);
+        ClipLauncherSlot slotTwoSlot = mock(ClipLauncherSlot.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+        when(slotTwoTrack.clipLauncherSlotBank()).thenReturn(slotTwoBank);
+        when(slotTwoBank.getItemAt(0)).thenReturn(slotTwoSlot);
+        slotOneTrackOut[0] = slotOneTrack;
+
+        new ClipHandler(manager, mockSceneBank, mockCursorClip, new StateCache()).register(local);
+        return slotTwoSlot;
+    }
+
+    private static String jsonString(String value) {
+        return "\"" + value.replace("\\", "\\\\") + "\"";
+    }
+
+    @Test
+    void clipInsertFile_existingBwclip_insertsAtTheCanonicalSlotsReplaceInsertionPoint()
+            throws IOException {
+        Path clip = Files.writeString(clipDir.resolve("fixture.bwclip"), "x");
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        Track[] slotOneTrack = new Track[1];
+        ClipLauncherSlot slot = canonicalSlotUnderNonIdentityMapping(local, slotOneTrack);
+        InsertionPoint insertionPoint = mock(InsertionPoint.class);
+        when(slot.replaceInsertionPoint()).thenReturn(insertionPoint);
+
+        String response = local.handle(rpc("clip/insertFile",
+            "{\"trackIndex\":1,\"slotIndex\":0,\"path\":" + jsonString(clip.toString()) + "}"));
+
+        assertContains(response, "\"ok\"");
+        verify(insertionPoint).insertFile(clip.toString());
+        verify(slotOneTrack[0], never()).clipLauncherSlotBank();
+    }
+
+    @Test
+    void clipInsertFile_relativePath_refusedBeforeInsertFile() {
+        assertInsertFileRefused("clips\\fixture.bwclip", 0, "clip file path is not absolute: ");
+    }
+
+    @Test
+    void clipInsertFile_twoBackslashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\server\\share\\fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_twoForwardSlashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("//server/share/fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_midPath_refusedForItsExtension() throws IOException {
+        Path mid = Files.writeString(clipDir.resolve("fixture.mid"), "x");
+        assertInsertFileRefused(mid.toString(), 0, "clip file path does not end in .bwclip: ");
+    }
+
+    @Test
+    void clipInsertFile_missingFile_refusedAsNotAnExistingFile() {
+        assertInsertFileRefused(clipDir.resolve("missing.bwclip").toString(), 0,
+            "clip file path is not an existing file: ");
+    }
+
+    @Test
+    void clipInsertFile_slotIndexSixteen_refusedOutOfRange() throws IOException {
+        Path clip = Files.writeString(clipDir.resolve("range.bwclip"), "x");
+        assertInsertFileRefused(clip.toString(), 16, "slot index out of range: 16");
+    }
+
+    @Test
+    void clipBrowseToInsert_callsBrowseToInsertClipOnTheCanonicalSlot() {
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        Track[] slotOneTrack = new Track[1];
+        ClipLauncherSlot slot = canonicalSlotUnderNonIdentityMapping(local, slotOneTrack);
+
+        String response = local.handle(rpc("clip/browseToInsert",
+            "{\"trackIndex\":1,\"slotIndex\":0}"));
+
+        assertContains(response, "\"ok\"");
+        verify(slot).browseToInsertClip();
+        verify(slotOneTrack[0], never()).clipLauncherSlotBank();
+    }
+
+    @Test
+    void clipBrowseToInsert_slotIndexSixteen_refusedOutOfRange() {
+        String response = dispatcher.handle(rpc("clip/browseToInsert",
+            "{\"trackIndex\":0,\"slotIndex\":16}"));
+        assertContains(response, "-32602");
+        assertContains(response, "slot index out of range: 16");
+        verify(mockSlot, never()).browseToInsertClip();
+    }
+
+    private void assertInsertFileRefused(String path, int slotIndex, String expectedMessage) {
+        when(mockSlot.replaceInsertionPoint()).thenReturn(mockInsertionPoint);
+        String response = dispatcher.handle(rpc("clip/insertFile",
+            "{\"trackIndex\":0,\"slotIndex\":" + slotIndex + ",\"path\":" + jsonString(path) + "}"));
+        assertContains(response, "-32602");
+        assertContains(response, expectedMessage);
+        verify(mockInsertionPoint, never()).insertFile(anyString());
     }
 
     // --- CR-03: one coordinate ---

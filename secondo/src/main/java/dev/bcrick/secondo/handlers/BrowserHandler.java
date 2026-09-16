@@ -4,6 +4,7 @@ import com.bitwig.extension.controller.api.BrowserFilterColumn;
 import com.bitwig.extension.controller.api.BrowserResultsItemBank;
 import com.bitwig.extension.controller.api.CursorBrowserFilterItem;
 import com.bitwig.extension.controller.api.CursorDevice;
+import com.bitwig.extension.controller.api.MasterTrack;
 import com.bitwig.extension.controller.api.PopupBrowser;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -29,12 +30,17 @@ public class BrowserHandler {
 
     private final PopupBrowser popupBrowser;
     private final CursorDevice cursorDevice;
+    private final MasterTrack masterTrack;
+    private final CursorDevice masterCursorDevice;
     private final StateCache stateCache;
 
     public BrowserHandler(PopupBrowser popupBrowser, CursorDevice cursorDevice,
+                           MasterTrack masterTrack, CursorDevice masterCursorDevice,
                            StateCache stateCache) {
         this.popupBrowser = popupBrowser;
         this.cursorDevice = cursorDevice;
+        this.masterTrack = masterTrack;
+        this.masterCursorDevice = masterCursorDevice;
         this.stateCache = stateCache;
     }
 
@@ -47,6 +53,28 @@ public class BrowserHandler {
 
         dispatcher.register("browser/browseInsertDevice", params -> {
             cursorDevice.afterDeviceInsertionPoint().browse();
+            return new JsonPrimitive("ok");
+        });
+
+        // Master chain openers (Phase 26, D-26-07 / D-26-08). Both open the ONE shared popup
+        // browser the StateCache observers already watch, so browser/getState sees them.
+        // MasterTrack extends Track (bitwig-api-reference.txt :16274), so the master track has the
+        // DeviceChain insertion points. The deprecated track device-browser factory is deliberately
+        // NOT used: it returns the deprecated Browser type, it is an init-only proxy factory that
+        // cannot be called from a request, and it would be a second browser the popup observers
+        // cannot see. Insertion points are resolved at request time; they are not factories.
+
+        // bitwig-api-reference.txt :16172 DeviceChain#endOfDeviceChainInsertionPoint -- the END of
+        // the master chain, independent of any cursor (as masterDevice/insert "end" uses it).
+        dispatcher.register("browser/browseMasterInsertDevice", params -> {
+            masterTrack.endOfDeviceChainInsertionPoint().browse();
+            return new JsonPrimitive("ok");
+        });
+
+        // bitwig-api-reference.txt :11746 Device#replaceDeviceInsertionPoint -- a commit
+        // REPLACES the master cursor device. Never the track cursor device.
+        dispatcher.register("browser/browseMasterPresets", params -> {
+            masterCursorDevice.replaceDeviceInsertionPoint().browse();
             return new JsonPrimitive("ok");
         });
 

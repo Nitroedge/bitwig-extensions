@@ -197,6 +197,53 @@ class StateCacheGetterTest {
         assertTrue(state.getAsJsonArray("items").get(0).getAsJsonObject().get("isSelected").getAsBoolean());
     }
 
+    /**
+     * Phase 26 (D-26-12): before any observer callback fires, every browser value that used to
+     * start at a Java default publishes JSON null, so an unobserved zero is not read as Bitwig's
+     * zero. exists stays a boolean.
+     */
+    @Test
+    void getBrowserState_beforeAnyObserver_publishesNullForEveryUnobservedField() {
+        JsonObject browser = cache.getBrowserState();
+
+        assertFalse(browser.get("exists").getAsBoolean());
+        for (String key : new String[] {"selectedContentType", "selectedContentTypeIndex",
+                "contentTypeNames", "resultName", "resultsEntryCount"}) {
+            assertTrue(browser.has(key), "missing key " + key);
+            assertTrue(browser.get(key).isJsonNull(), key + " should be null before observation");
+        }
+
+        JsonObject filters = browser.getAsJsonObject("filters");
+        assertEquals(8, filters.size());
+        for (String column : filters.keySet()) {
+            JsonObject col = filters.getAsJsonObject(column);
+            assertTrue(col.get("exists").isJsonPrimitive(), column + ".exists stays a boolean");
+            assertFalse(col.get("exists").getAsBoolean());
+            for (String key : new String[] {"name", "hitCount", "entryCount", "hasNext",
+                    "hasPrevious", "wildcardHitCount"}) {
+                assertTrue(col.has(key), column + " missing " + key);
+                assertTrue(col.get(key).isJsonNull(), column + "." + key + " should be null");
+            }
+        }
+    }
+
+    /**
+     * Phase 26 (D-26-14): the result bank publishes its constructed width and null scroll info
+     * until the bank's observers fire.
+     */
+    @Test
+    void getResultBankState_beforeAnyObserver_publishesNullScrollInfoAndBankSize() {
+        JsonObject state = cache.getResultBankState();
+
+        assertEquals(8, state.get("bankSize").getAsInt());
+        assertEquals(8, state.getAsJsonArray("items").size());
+        for (String key : new String[] {"entryCount", "scrollPosition", "itemCount",
+                "canScrollBackwards", "canScrollForwards"}) {
+            assertTrue(state.has(key), "missing key " + key);
+            assertTrue(state.get(key).isJsonNull(), key + " should be null before observation");
+        }
+    }
+
     @Test
     void getClipLaunchSettings_structure() {
         populateClip(cache);

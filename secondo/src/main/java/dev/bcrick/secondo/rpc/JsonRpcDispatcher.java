@@ -42,6 +42,16 @@ public class JsonRpcDispatcher {
      * than changed: the master row's colour null was removed by Phase 25 and master colour is
      * now always an object, which is why 3b53206 greps 8 and this pin greps 25 rather than 26.
      *
+     * <p>2026-09-16, plan 26-06 (Phase 26 browser build, 0.2.4): the browser read side
+     * (browser/getState, browser/getFilters, browser/getResults) and the new session/snapshot
+     * masterChain section now publish explicit nulls for every value not yet observed
+     * (D-26-12, D-26-20). Most of them go through addProperty with a null boxed value, which
+     * Gson writes as the same JSON null but which the literal grep does not count. Recounted
+     * over secondo/src/main/java after this line was written: grep -o "JsonNull.INSTANCE" finds
+     * 30 occurrences in four files: 27 code sites (14 in StateCache.java, +2 on the 12 above:
+     * contentTypeNames and a masterChain deviceNames slot; 6 in DeviceHandler.java; 1 in
+     * TrackHandler.java; 6 envelope ids here) plus 3 mentions in this comment.
+     *
      * <p>THE READER RULE that follows from it. A Python reader tests value is None, NEVER key
      * membership. The two device.py sites named above are the sole exception and were written
      * for this flag deliberately. The six envelope ids are the JSON-RPC 2.0 id null the spec

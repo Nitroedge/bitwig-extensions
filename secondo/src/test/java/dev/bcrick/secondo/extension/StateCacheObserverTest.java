@@ -144,6 +144,113 @@ class StateCacheObserverTest {
             .get("activated").getAsBoolean());
     }
 
+    // --- Phase 26: browser read-side observers (D-26-12, D-26-14) ---
+
+    /** Stubs the casts registerBrowserObservers / registerFilterObservers make on deep stubs. */
+    private static PopupBrowser browserWithCastableItems(BrowserResultsItemBank bank,
+                                                         BrowserFilterColumn[] columns,
+                                                         CursorBrowserFilterItem[] cursors) {
+        PopupBrowser popup = mock(PopupBrowser.class, RETURNS_DEEP_STUBS);
+        when(popup.resultsColumn().createItemBank(8)).thenReturn(bank);
+        for (int i = 0; i < 8; i++) {
+            when(bank.getItemAt(i)).thenReturn(mock(BrowserResultsItem.class, RETURNS_DEEP_STUBS));
+        }
+        for (int i = 0; i < 8; i++) {
+            columns[i] = mock(BrowserFilterColumn.class, RETURNS_DEEP_STUBS);
+            cursors[i] = mock(CursorBrowserFilterItem.class, RETURNS_DEEP_STUBS);
+            when(columns[i].createCursorItem()).thenReturn(cursors[i]);
+        }
+        when(popup.categoryColumn()).thenReturn(columns[0]);
+        when(popup.tagColumn()).thenReturn(columns[1]);
+        when(popup.creatorColumn()).thenReturn(columns[2]);
+        when(popup.deviceColumn()).thenReturn(columns[3]);
+        when(popup.deviceTypeColumn()).thenReturn(columns[4]);
+        when(popup.fileTypeColumn()).thenReturn(columns[5]);
+        when(popup.locationColumn()).thenReturn(columns[6]);
+        when(popup.smartCollectionColumn()).thenReturn(columns[7]);
+        return popup;
+    }
+
+    private static IntegerValueChangedCallback intObserver(IntegerValue value) {
+        ArgumentCaptor<IntegerValueChangedCallback> captor =
+                ArgumentCaptor.forClass(IntegerValueChangedCallback.class);
+        verify(value).addValueObserver(captor.capture());
+        return captor.getValue();
+    }
+
+    private static BooleanValueChangedCallback boolObserver(BooleanValue value) {
+        ArgumentCaptor<BooleanValueChangedCallback> captor =
+                ArgumentCaptor.forClass(BooleanValueChangedCallback.class);
+        verify(value).addValueObserver(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    void registerBrowserObservers_marksContentTypeIndexAndResultBankScrollInterested() {
+        BrowserResultsItemBank bank = mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS);
+        PopupBrowser popup = browserWithCastableItems(bank, new BrowserFilterColumn[8],
+                new CursorBrowserFilterItem[8]);
+
+        cache.registerBrowserObservers(popup);
+
+        verify(popup.selectedContentTypeIndex()).markInterested();
+        verify(bank.scrollPosition()).markInterested();
+        verify(bank.itemCount()).markInterested();
+        verify(bank.canScrollForwards()).markInterested();
+        verify(bank.canScrollBackwards()).markInterested();
+
+        assertTrue(cache.getResultBankState().get("scrollPosition").isJsonNull());
+
+        intObserver(popup.selectedContentTypeIndex()).valueChanged(3);
+        intObserver(bank.scrollPosition()).valueChanged(8);
+        intObserver(bank.itemCount()).valueChanged(1661);
+        boolObserver(bank.canScrollBackwards()).valueChanged(true);
+        boolObserver(bank.canScrollForwards()).valueChanged(false);
+        intObserver(popup.resultsColumn().entryCount()).valueChanged(0);
+
+        JsonObject results = cache.getResultBankState();
+        assertEquals(8, results.get("scrollPosition").getAsInt());
+        assertEquals(1661, results.get("itemCount").getAsInt());
+        assertTrue(results.get("canScrollBackwards").getAsBoolean());
+        assertFalse(results.get("canScrollForwards").getAsBoolean());
+        // An OBSERVED zero is a zero, not a null.
+        assertEquals(0, results.get("entryCount").getAsInt());
+        assertEquals(3, cache.getBrowserState().get("selectedContentTypeIndex").getAsInt());
+    }
+
+    @Test
+    void registerFilterObservers_marksHasNextHasPreviousAndWildcardHitCountInterested() {
+        BrowserFilterColumn[] columns = new BrowserFilterColumn[8];
+        CursorBrowserFilterItem[] cursors = new CursorBrowserFilterItem[8];
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), columns, cursors);
+
+        cache.registerFilterObservers(popup);
+
+        for (int i = 0; i < 8; i++) {
+            verify(cursors[i].hasNext()).markInterested();
+            verify(cursors[i].hasPrevious()).markInterested();
+            verify(columns[i].getWildcardItem().hitCount()).markInterested();
+        }
+
+        // deviceType is column 4: Bitwig's zero on the entry, a real count on the wildcard.
+        intObserver(cursors[4].hitCount()).valueChanged(0);
+        intObserver(columns[4].getWildcardItem().hitCount()).valueChanged(1661);
+        boolObserver(cursors[4].hasNext()).valueChanged(true);
+        boolObserver(cursors[4].hasPrevious()).valueChanged(false);
+
+        JsonObject filters = cache.getBrowserState().getAsJsonObject("filters");
+        JsonObject deviceType = filters.getAsJsonObject("deviceType");
+        assertEquals(0, deviceType.get("hitCount").getAsInt());
+        assertEquals(1661, deviceType.get("wildcardHitCount").getAsInt());
+        assertTrue(deviceType.get("hasNext").getAsBoolean());
+        assertFalse(deviceType.get("hasPrevious").getAsBoolean());
+        JsonObject category = filters.getAsJsonObject("category");
+        assertTrue(category.get("hitCount").isJsonNull());
+        assertTrue(category.get("wildcardHitCount").isJsonNull());
+        assertTrue(category.get("name").isJsonNull());
+    }
+
     private static List<Integer> jsonInts(JsonArray values) {
         List<Integer> result = new ArrayList<>();
         values.forEach(value -> result.add(value.getAsInt()));

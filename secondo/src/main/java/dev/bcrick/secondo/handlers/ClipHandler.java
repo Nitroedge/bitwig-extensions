@@ -11,6 +11,10 @@ import com.google.gson.JsonPrimitive;
 
 import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
 
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.util.Locale;
 import java.util.Set;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
@@ -129,6 +133,38 @@ public class ClipHandler {
             ClipLauncherSlot sourceSlot = (ClipLauncherSlot) getSlotBank(srcTrackIndex).getItemAt(srcSlotIndex);
             ClipLauncherSlot destSlot = (ClipLauncherSlot) getSlotBank(destTrackIndex).getItemAt(destSlotIndex);
             destSlot.replaceInsertionPoint().copySlotsOrScenes(sourceSlot);
+            return new JsonPrimitive("ok");
+        });
+
+        // Phase 26 (D-4 / B-3): load a saved .bwclip into a launcher slot.
+        // bitwig-api-reference.txt :902 ClipLauncherSlot#replaceInsertionPoint() and :14177
+        // InsertionPoint#insertFile(String) -- whose own doc sentence is "If it's not possible to
+        // do so then this does nothing." So this route's "ok" is NEVER proof of a load: it means
+        // the path passed the engine-side checks and the call was dispatched. The tool verifies by
+        // reading the slot back. The path checks are repeated here (D-26-22) because bitwig_call
+        // reaches this method without the Python checks. The insertion point is resolved at
+        // request time, as clip/duplicateToSlot's is; it is not a proxy factory.
+        dispatcher.register("clip/insertFile", params -> {
+            int trackIndex = requireInt(params, "trackIndex");
+            int slotIndex = requireInt(params, "slotIndex");
+            String path = requireString(params, "path");
+            validateClipFilePath(path);
+            requireSlotIndex(slotIndex);
+            ClipLauncherSlot slot = (ClipLauncherSlot) getSlotBank(trackIndex).getItemAt(slotIndex);
+            slot.replaceInsertionPoint().insertFile(path);
+            return new JsonPrimitive("ok");
+        });
+
+        // Phase 26 (E5): open the one shared popup browser to insert a clip into a slot.
+        // bitwig-api-reference.txt :6218 ClipLauncherSlot#browseToInsertClip. D-26-18: this is
+        // the ONE slot opener registered. The fallback, replaceInsertionPoint().browse(), would
+        // ship under this same method name, and only if the stage-2 probe shows this call
+        // misbehaving on an occupied slot.
+        dispatcher.register("clip/browseToInsert", params -> {
+            int trackIndex = requireInt(params, "trackIndex");
+            int slotIndex = requireInt(params, "slotIndex");
+            requireSlotIndex(slotIndex);
+            ((ClipLauncherSlot) getSlotBank(trackIndex).getItemAt(slotIndex)).browseToInsertClip();
             return new JsonPrimitive("ok");
         });
 
@@ -304,6 +340,50 @@ public class ClipHandler {
     private ClipLauncherSlotBank getSlotBank(int trackIndex) {
         Track track = trackBankManager.getCanonicalTrack(trackIndex);
         return track.clipLauncherSlotBank();
+    }
+
+    /**
+     * The slot range both Phase 26 slot routes share, worded as scene/launch words its own.
+     */
+    private static void requireSlotIndex(int slotIndex) {
+        if (slotIndex < 0 || slotIndex >= SCENE_COUNT) {
+            throw new IllegalArgumentException("slot index out of range: " + slotIndex);
+        }
+    }
+
+    /**
+     * D-26-22: the engine-side clip file checks, in the contract's order. Each failure is an
+     * IllegalArgumentException (-32602) and insertFile is never reached.
+     *
+     * <ol>
+     *   <li>not absolute: "clip file path is not absolute: "</li>
+     *   <li>starts with two backslashes or two forward slashes: "clip file path is a network path: "</li>
+     *   <li>lower-cased path does not end with ".bwclip": "clip file path does not end in .bwclip: "</li>
+     *   <li>not a regular file: "clip file path is not an existing file: "</li>
+     * </ol>
+     *
+     * A path the platform cannot parse at all (InvalidPathException) cannot be proven absolute
+     * or existing; it skips the absoluteness check and ends at the last message.
+     */
+    private static void validateClipFilePath(String path) {
+        Path parsed;
+        try {
+            parsed = Path.of(path);
+        } catch (InvalidPathException e) {
+            parsed = null;
+        }
+        if (parsed != null && !parsed.isAbsolute()) {
+            throw new IllegalArgumentException("clip file path is not absolute: " + path);
+        }
+        if (path.startsWith("\\\\") || path.startsWith("//")) {
+            throw new IllegalArgumentException("clip file path is a network path: " + path);
+        }
+        if (!path.toLowerCase(Locale.ROOT).endsWith(".bwclip")) {
+            throw new IllegalArgumentException("clip file path does not end in .bwclip: " + path);
+        }
+        if (parsed == null || !Files.isRegularFile(parsed)) {
+            throw new IllegalArgumentException("clip file path is not an existing file: " + path);
+        }
     }
 
 

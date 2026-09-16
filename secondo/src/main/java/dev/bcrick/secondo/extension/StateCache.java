@@ -289,13 +289,21 @@ public class StateCache {
     private volatile boolean automationOverrideActive;
 
     // Browser state
+    //
+    // NULL UNTIL OBSERVED (Phase 26, D-26-12 / D-25-15). The fields below that used to start at a
+    // Java default ("" / 0 / an empty array) are boxed and start at null, and getBrowserState /
+    // getResultBankState publish that null as JSON null. Stage 1 (26-LIVE-STAGE-1.md) read a
+    // resultsEntryCount of 0 at open and a deviceType hitCount of 0 in every context, and the
+    // record could not tell Bitwig's zero from a default nobody had observed. A null is that
+    // distinction. Every reader treats null as unknown.
     private volatile boolean browserExists;
     private volatile String browserTitle = "";
-    private volatile String browserSelectedContentType = "";
-    private volatile String[] browserContentTypeNames = new String[0];
+    private volatile String browserSelectedContentType;
+    private volatile Integer browserSelectedContentTypeIndex;
+    private volatile String[] browserContentTypeNames;
     private volatile boolean browserCanAudition;
     private volatile boolean browserShouldAudition;
-    private volatile String browserResultName = "";
+    private volatile String browserResultName;
     private volatile boolean browserResultIsSelected;
 
     // Browser filter state — 8 named columns
@@ -306,8 +314,13 @@ public class StateCache {
     };
     private final boolean[] filterExists = new boolean[FILTER_COLUMN_COUNT];
     private final String[] filterNames = new String[FILTER_COLUMN_COUNT];
-    private final int[] filterHitCounts = new int[FILTER_COLUMN_COUNT];
-    private final int[] filterEntryCounts = new int[FILTER_COLUMN_COUNT];
+    private final Integer[] filterHitCounts = new Integer[FILTER_COLUMN_COUNT];
+    private final Integer[] filterEntryCounts = new Integer[FILTER_COLUMN_COUNT];
+    // Phase 26 (D-26-12): the column cursor's position flags and the wildcard item's hit count,
+    // which separates "this entry matches nothing" from an unobserved hit count (D-5 / S-09).
+    private final Boolean[] filterHasNext = new Boolean[FILTER_COLUMN_COUNT];
+    private final Boolean[] filterHasPrevious = new Boolean[FILTER_COLUMN_COUNT];
+    private final Integer[] filterWildcardHitCounts = new Integer[FILTER_COLUMN_COUNT];
     private CursorBrowserFilterItem[] filterCursors;
     private BrowserFilterColumn[] filterColumns;
 
@@ -315,8 +328,21 @@ public class StateCache {
     private static final int RESULT_BANK_SIZE = 8;
     private final String[] resultBankNames = new String[RESULT_BANK_SIZE];
     private final boolean[] resultBankSelected = new boolean[RESULT_BANK_SIZE];
-    private volatile int resultsEntryCount;
+    private volatile Integer resultsEntryCount;
     private BrowserResultsItemBank resultBank;
+    // Phase 26 (D-26-14): the result bank's own scroll info, so an end of list is PROVEN by a
+    // canScroll flag reading false rather than inferred from eight names not moving.
+    private volatile Integer resultBankScrollPosition;
+    private volatile Integer resultBankItemCount;
+    private volatile Boolean resultBankCanScrollBackwards;
+    private volatile Boolean resultBankCanScrollForwards;
+
+    // Master chain (Phase 26, D-26-20): an init-time DeviceBank on the master track, so the
+    // master chain's device count and names are readable without moving the master cursor.
+    public static final int MASTER_CHAIN_BANK_WIDTH = 16;
+    private volatile Integer masterChainDeviceCount;
+    private final Boolean[] masterChainExists = new Boolean[MASTER_CHAIN_BANK_WIDTH];
+    private final String[] masterChainNames = new String[MASTER_CHAIN_BANK_WIDTH];
 
     // Cue marker state
     private static final int CUE_MARKER_COUNT = 16;
@@ -369,6 +395,7 @@ public class StateCache {
     private int prevArrangementHash;
     private int prevMasterDeviceHash;
     private int prevBrowserHash;
+    private int prevMasterChainHash;
     private int prevArpeggiatorHash;
     private int prevNoteLatchHash;
 
@@ -1114,6 +1141,10 @@ public class StateCache {
         popupBrowser.selectedContentTypeName().markInterested();
         popupBrowser.selectedContentTypeName().addValueObserver((StringValueChangedCallback) v -> browserSelectedContentType = (String) v);
 
+        // Phase 26 (E6, D-26-10): the index read back, so a setContentType step is attributable.
+        popupBrowser.selectedContentTypeIndex().markInterested();
+        popupBrowser.selectedContentTypeIndex().addValueObserver((IntegerValueChangedCallback) v -> browserSelectedContentTypeIndex = v);
+
         popupBrowser.contentTypeNames().markInterested();
         popupBrowser.contentTypeNames().addValueObserver((StringArrayValueChangedCallback) v -> browserContentTypeNames = (String[]) v);
 
@@ -1132,6 +1163,16 @@ public class StateCache {
             resultBankNames[i] = "";
         }
         resultBank = (BrowserResultsItemBank) popupBrowser.resultsColumn().createItemBank(RESULT_BANK_SIZE);
+
+        // Phase 26 (D-26-14): the bank's scroll info, registered here at initialization only.
+        resultBank.scrollPosition().markInterested();
+        resultBank.scrollPosition().addValueObserver((IntegerValueChangedCallback) v -> resultBankScrollPosition = v);
+        resultBank.itemCount().markInterested();
+        resultBank.itemCount().addValueObserver((IntegerValueChangedCallback) v -> resultBankItemCount = v);
+        resultBank.canScrollForwards().markInterested();
+        resultBank.canScrollForwards().addValueObserver((BooleanValueChangedCallback) v -> resultBankCanScrollForwards = v);
+        resultBank.canScrollBackwards().markInterested();
+        resultBank.canScrollBackwards().addValueObserver((BooleanValueChangedCallback) v -> resultBankCanScrollBackwards = v);
         for (int i = 0; i < RESULT_BANK_SIZE; i++) {
             final int idx = i;
             BrowserResultsItem item = (BrowserResultsItem) resultBank.getItemAt(i);
@@ -1151,10 +1192,7 @@ public class StateCache {
     }
 
     public void registerFilterObservers(PopupBrowser popupBrowser) {
-        // Initialize arrays
-        for (int i = 0; i < FILTER_COLUMN_COUNT; i++) {
-            filterNames[i] = "";
-        }
+        // No pre-fill: every per-column value stays null until its observer fires (D-26-12).
 
         // Map named columns to array indices matching FILTER_COLUMN_NAMES order
         BrowserFilterColumn[] columns = {
@@ -1188,7 +1226,59 @@ public class StateCache {
 
             cursor.hitCount().markInterested();
             cursor.hitCount().addValueObserver((IntegerValueChangedCallback) v -> filterHitCounts[idx] = v);
+
+            // Phase 26 (D-26-12, F-17-12 / D-5)
+            cursor.hasNext().markInterested();
+            cursor.hasNext().addValueObserver((BooleanValueChangedCallback) v -> filterHasNext[idx] = v);
+
+            cursor.hasPrevious().markInterested();
+            cursor.hasPrevious().addValueObserver((BooleanValueChangedCallback) v -> filterHasPrevious[idx] = v);
+
+            col.getWildcardItem().hitCount().markInterested();
+            col.getWildcardItem().hitCount().addValueObserver((IntegerValueChangedCallback) v -> filterWildcardHitCounts[idx] = v);
         }
+    }
+
+    /**
+     * Phase 26 (D-26-20). Registered from SecondoExtension.init with the master track's init-time
+     * DeviceBank of MASTER_CHAIN_BANK_WIDTH; never from a request (D-25-20). While a popup
+     * browser with Live Preview is open, the previewed device is in the chain and is counted.
+     */
+    public void registerMasterChainObservers(DeviceBank masterDeviceBank) {
+        masterDeviceBank.itemCount().markInterested();
+        masterDeviceBank.itemCount().addValueObserver((IntegerValueChangedCallback) v -> masterChainDeviceCount = v);
+
+        for (int i = 0; i < MASTER_CHAIN_BANK_WIDTH; i++) {
+            final int idx = i;
+            Device device = masterDeviceBank.getItemAt(i);
+
+            device.exists().markInterested();
+            device.exists().addValueObserver((BooleanValueChangedCallback) v -> masterChainExists[idx] = v);
+
+            device.name().markInterested();
+            device.name().addValueObserver((StringValueChangedCallback) v -> masterChainNames[idx] = (String) v);
+        }
+    }
+
+    /**
+     * The session/snapshot masterChain section: {deviceCount:int|null, bankSize:16,
+     * deviceNames:[string|null x 16]}. A slot's name is published only when that slot's exists
+     * was observed true; otherwise null.
+     */
+    public JsonObject getMasterChainState() {
+        JsonObject obj = new JsonObject();
+        obj.addProperty("deviceCount", masterChainDeviceCount);
+        obj.addProperty("bankSize", MASTER_CHAIN_BANK_WIDTH);
+        JsonArray names = new JsonArray();
+        for (int i = 0; i < MASTER_CHAIN_BANK_WIDTH; i++) {
+            if (Boolean.TRUE.equals(masterChainExists[i]) && masterChainNames[i] != null) {
+                names.add(masterChainNames[i]);
+            } else {
+                names.add(JsonNull.INSTANCE);
+            }
+        }
+        obj.add("deviceNames", names);
+        return obj;
     }
 
     public void registerNoteInputObservers(Arpeggiator arpeggiator, NoteLatch noteLatch) {
@@ -1287,6 +1377,11 @@ public class StateCache {
         }
         obj.add("items", items);
         obj.addProperty("entryCount", resultsEntryCount);
+        obj.addProperty("bankSize", RESULT_BANK_SIZE);
+        obj.addProperty("scrollPosition", resultBankScrollPosition);
+        obj.addProperty("itemCount", resultBankItemCount);
+        obj.addProperty("canScrollBackwards", resultBankCanScrollBackwards);
+        obj.addProperty("canScrollForwards", resultBankCanScrollForwards);
         return obj;
     }
 
@@ -1438,6 +1533,7 @@ public class StateCache {
         snapshot.add("arranger", getArrangerState());
         snapshot.add("arrangement", getArrangementState());
         snapshot.add("masterDevice", getMasterDeviceState());
+        snapshot.add("masterChain", getMasterChainState());
         snapshot.add("browser", getBrowserState());
         snapshot.add("arpeggiator", getArpeggiatorState());
         snapshot.add("noteLatch", getNoteLatchState());
@@ -1482,6 +1578,8 @@ public class StateCache {
         checkSection("arranger", getArrangerState(), changed, data);
         checkSection("arrangement", getArrangementState(), changed, data);
         checkSection("masterDevice", getMasterDeviceState(), changed, data);
+        // In the delta AND in WsRpcServer.VALID_TOPICS, so a subscriber can ask for it (D6-DEF-03).
+        checkSection("masterChain", getMasterChainState(), changed, data);
         checkSection("browser", getBrowserState(), changed, data);
         checkSection("arpeggiator", getArpeggiatorState(), changed, data);
         checkSection("noteLatch", getNoteLatchState(), changed, data);
@@ -1519,6 +1617,7 @@ public class StateCache {
             case "arranger" -> prevArrangerHash;
             case "arrangement" -> prevArrangementHash;
             case "masterDevice" -> prevMasterDeviceHash;
+            case "masterChain" -> prevMasterChainHash;
             case "browser" -> prevBrowserHash;
             case "arpeggiator" -> prevArpeggiatorHash;
             case "noteLatch" -> prevNoteLatchHash;
@@ -1539,6 +1638,7 @@ public class StateCache {
             case "arranger" -> prevArrangerHash = hash;
             case "arrangement" -> prevArrangementHash = hash;
             case "masterDevice" -> prevMasterDeviceHash = hash;
+            case "masterChain" -> prevMasterChainHash = hash;
             case "browser" -> prevBrowserHash = hash;
             case "arpeggiator" -> prevArpeggiatorHash = hash;
             case "noteLatch" -> prevNoteLatchHash = hash;
@@ -2293,15 +2393,18 @@ public class StateCache {
         obj.addProperty("exists", browserExists);
         obj.addProperty("title", browserTitle);
         obj.addProperty("selectedContentType", browserSelectedContentType);
+        obj.addProperty("selectedContentTypeIndex", browserSelectedContentTypeIndex);
 
-        JsonArray contentTypes = new JsonArray();
         String[] names = browserContentTypeNames;
         if (names != null) {
+            JsonArray contentTypes = new JsonArray();
             for (String name : names) {
                 contentTypes.add(name != null ? name : "");
             }
+            obj.add("contentTypeNames", contentTypes);
+        } else {
+            obj.add("contentTypeNames", JsonNull.INSTANCE);
         }
-        obj.add("contentTypeNames", contentTypes);
 
         obj.addProperty("canAudition", browserCanAudition);
         obj.addProperty("shouldAudition", browserShouldAudition);
@@ -2314,9 +2417,12 @@ public class StateCache {
         for (int i = 0; i < FILTER_COLUMN_COUNT; i++) {
             JsonObject col = new JsonObject();
             col.addProperty("exists", filterExists[i]);
-            col.addProperty("name", filterNames[i] != null ? filterNames[i] : "");
+            col.addProperty("name", filterNames[i]);
             col.addProperty("hitCount", filterHitCounts[i]);
             col.addProperty("entryCount", filterEntryCounts[i]);
+            col.addProperty("hasNext", filterHasNext[i]);
+            col.addProperty("hasPrevious", filterHasPrevious[i]);
+            col.addProperty("wildcardHitCount", filterWildcardHitCounts[i]);
             filters.add(FILTER_COLUMN_NAMES[i], col);
         }
         obj.add("filters", filters);

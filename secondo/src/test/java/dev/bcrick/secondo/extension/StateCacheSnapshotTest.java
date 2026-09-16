@@ -1,14 +1,21 @@
 package dev.bcrick.secondo.extension;
 
+import com.bitwig.extension.callback.BooleanValueChangedCallback;
+import com.bitwig.extension.callback.IntegerValueChangedCallback;
+import com.bitwig.extension.callback.StringValueChangedCallback;
+import com.bitwig.extension.controller.api.Device;
+import com.bitwig.extension.controller.api.DeviceBank;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 
 import static dev.bcrick.secondo.extension.StateCacheTestHelper.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 class StateCacheSnapshotTest {
 
@@ -341,6 +348,65 @@ class StateCacheSnapshotTest {
         assertEquals("Synth", category.get("name").getAsString());
         assertEquals(10, category.get("hitCount").getAsInt());
         assertEquals(25, category.get("entryCount").getAsInt());
+    }
+
+    /**
+     * Phase 26 (D-26-20): session/snapshot carries masterChain, null until the init-time master
+     * DeviceBank's observers fire, then the observed count and the names of slots observed to
+     * exist. The section also takes part in the delta check.
+     */
+    @Test
+    void snapshot_masterChain_nullUntilObserved_thenObservedCountAndNames() {
+        JsonObject cold = cache.getSnapshot().getAsJsonObject("masterChain");
+        assertTrue(cold.get("deviceCount").isJsonNull());
+        assertEquals(16, cold.get("bankSize").getAsInt());
+        JsonArray coldNames = cold.getAsJsonArray("deviceNames");
+        assertEquals(16, coldNames.size());
+        coldNames.forEach(name -> assertTrue(name.isJsonNull()));
+        assertTrue(cache.getChangedSections().contains("masterChain"));
+
+        DeviceBank bank = mock(DeviceBank.class, RETURNS_DEEP_STUBS);
+        Device[] devices = new Device[StateCache.MASTER_CHAIN_BANK_WIDTH];
+        for (int i = 0; i < devices.length; i++) {
+            devices[i] = mock(Device.class, RETURNS_DEEP_STUBS);
+            when(bank.getItemAt(i)).thenReturn(devices[i]);
+        }
+        cache.registerMasterChainObservers(bank);
+
+        verify(bank.itemCount()).markInterested();
+        for (Device device : devices) {
+            verify(device.exists()).markInterested();
+            verify(device.name()).markInterested();
+        }
+
+        ArgumentCaptor<IntegerValueChangedCallback> count =
+                ArgumentCaptor.forClass(IntegerValueChangedCallback.class);
+        verify(bank.itemCount()).addValueObserver(count.capture());
+        count.getValue().valueChanged(2);
+        fireDevice(devices[0], true, "EQ+");
+        fireDevice(devices[1], true, "Peak Limiter");
+        // A name with exists observed false is not published.
+        fireDevice(devices[2], false, "Stale");
+
+        JsonObject observed = cache.getSnapshot().getAsJsonObject("masterChain");
+        assertEquals(2, observed.get("deviceCount").getAsInt());
+        JsonArray names = observed.getAsJsonArray("deviceNames");
+        assertEquals("EQ+", names.get(0).getAsString());
+        assertEquals("Peak Limiter", names.get(1).getAsString());
+        assertTrue(names.get(2).isJsonNull());
+        assertTrue(names.get(15).isJsonNull());
+        assertTrue(cache.getChangedSections().contains("masterChain"));
+    }
+
+    private static void fireDevice(Device device, boolean exists, String name) {
+        ArgumentCaptor<BooleanValueChangedCallback> existsCaptor =
+                ArgumentCaptor.forClass(BooleanValueChangedCallback.class);
+        verify(device.exists()).addValueObserver(existsCaptor.capture());
+        existsCaptor.getValue().valueChanged(exists);
+        ArgumentCaptor<StringValueChangedCallback> nameCaptor =
+                ArgumentCaptor.forClass(StringValueChangedCallback.class);
+        verify(device.name()).addValueObserver(nameCaptor.capture());
+        nameCaptor.getValue().valueChanged(name);
     }
 
     @Test

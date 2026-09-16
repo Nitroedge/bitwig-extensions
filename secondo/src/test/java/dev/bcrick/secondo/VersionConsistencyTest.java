@@ -80,10 +80,17 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.3",
+            "0.2.4",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.3 (secondo Phase 25 GAP-CLOSURE correction, plan "
-                + "25-26; bumped from 0.2.2 because this build changes wire behaviour and "
+            "The engine's version is 0.2.4 (secondo Phase 26 browser build, plan 26-06; bumped "
+                + "from 0.2.3 because this build changes wire behaviour and diagnose's version "
+                + "row must be able to tell it from the build before it: FOUR NEW METHODS -- "
+                + "clip/insertFile, clip/browseToInsert, browser/browseMasterInsertDevice and "
+                + "browser/browseMasterPresets; the browser read side publishes JSON null for "
+                + "every field not yet observed, plus result-bank scroll info, filter "
+                + "hasNext/hasPrevious/wildcardHitCount and selectedContentTypeIndex; and "
+                + "session/snapshot gains a masterChain section. 0.2.3 was the Phase 25 "
+                + "GAP-CLOSURE correction, plan 25-26, bumped from 0.2.2 because this build changes wire behaviour and "
                 + "diagnose's version row must be able to tell it from the build before it: "
                 + "ONE CANONICAL COORDINATE -- every indexed track method now resolves through "
                 + "TrackBankManager.getCanonicalTrack instead of subscripting the flat bank raw "

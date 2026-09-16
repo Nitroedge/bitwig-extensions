@@ -208,11 +208,18 @@ flowchart TD
 
 ### `session/snapshot`
 
-Retrieve the full current state of the Bitwig Studio session. Returns transport state, all tracks, master track, project state, clip grid, scenes, device state, master device state, application state, arranger state, arrangement state, browser state, arpeggiator state, note latch state, and groove state.
+Retrieve the full current state of the Bitwig Studio session. Returns transport state, all tracks, master track, project state, clip grid, scenes, device state, master device state, master chain, application state, arranger state, arrangement state, browser state, arpeggiator state, note latch state, and groove state.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | *(none)* | | | |
+
+**`masterChain` (Phase 26, 0.2.4, D-26-20).** `{deviceCount: integer|null, bankSize: 16,
+deviceNames: [string|null x 16]}`, read from a master-track device bank created at extension
+initialization. `deviceCount` is `null` until observed. A slot's name is published only when that
+slot's `exists` was observed `true`; otherwise it is `null`. While a popup browser with Live Preview
+is open, the previewed device is in the chain and is counted. `masterChain` is also a WebSocket
+delta section and a subscribable `state/subscribe` topic.
 
 ### `session/transaction`
 
@@ -1216,6 +1223,42 @@ Copy a clip from one slot to another, replacing the destination.
 | `destTrackIndex` | integer | yes | Destination track index (0-63) |
 | `destSlotIndex` | integer | yes | Destination slot index (0-7) |
 
+### `clip/insertFile`
+
+Load a saved `.bwclip` file into a clip launcher slot (Phase 26, D-4 / B-3). The effect is
+`slot.replaceInsertionPoint().insertFile(path)` on the slot of the canonical track. Answers `"ok"`
+once the call is dispatched. **`"ok"` is never proof of a load**: Bitwig documents that
+`insertFile` "does nothing" when it cannot insert, so a caller verifies by reading the slot back.
+Calling it again after an unconfirmed load can duplicate or replace content; read back first.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `trackIndex` | integer | yes | Canonical track index, as `session/snapshot` publishes it |
+| `slotIndex` | integer | yes | Clip slot index (0-15) |
+| `path` | string | yes | Absolute local path to an existing `.bwclip` file |
+
+Errors (`-32602`), checked in this order, all before `insertFile` is called:
+
+- `clip file path is not absolute: <path>`
+- `clip file path is a network path: <path>` (starts with two backslashes or two forward slashes)
+- `clip file path does not end in .bwclip: <path>` (case-insensitive)
+- `clip file path is not an existing file: <path>` (also for a path the platform cannot parse)
+- `slot index out of range: <slotIndex>`
+
+### `clip/browseToInsert`
+
+Open the shared popup browser to insert a clip into a clip launcher slot (Phase 26, E5). The
+effect is `ClipLauncherSlot.browseToInsertClip` on the slot of the canonical track; it is the only
+slot opener registered (D-26-18). Answers `"ok"` once dispatched; observe `browser/getState`'s
+`exists` to prove the popup opened.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `trackIndex` | integer | yes | Canonical track index, as `session/snapshot` publishes it |
+| `slotIndex` | integer | yes | Clip slot index (0-15) |
+
+Errors (`-32602`): `slot index out of range: <slotIndex>`.
+
 ### `clip/setColor`
 
 Set the color of a clip launcher slot (RGB 0.0 to 1.0).
@@ -2092,6 +2135,28 @@ Open the browser for inserting a new device.
 |-----------|------|----------|-------------|
 | *(none)* | | | |
 
+### `browser/browseMasterInsertDevice`
+
+Open the shared popup browser to insert a device at the END of the master track device chain
+(Phase 26, D-26-07). The effect is `masterTrack.endOfDeviceChainInsertionPoint().browse()`,
+independent of any cursor. Answers `"ok"` once dispatched; observe `browser/getState`'s `exists`
+to prove the popup opened. No errors beyond the JSON-RPC envelope.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
+### `browser/browseMasterPresets`
+
+Open the shared popup browser to replace the master cursor device (Phase 26, D-26-08). The effect
+is `masterCursorDevice.replaceDeviceInsertionPoint().browse()`; a commit replaces the master cursor
+device, never the track cursor device. Answers `"ok"` once dispatched. No errors beyond the
+JSON-RPC envelope.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
 ### `browser/selectNextFile`
 
 Select the next result in the browser.
@@ -2158,11 +2223,30 @@ Enable or disable audition mode in the browser.
 
 ### `browser/getState`
 
-Get browser state: exists, title, selectedContentType, contentTypeNames, canAudition, shouldAudition, resultName, resultIsSelected.
+Get browser state: exists, title, selectedContentType, selectedContentTypeIndex, contentTypeNames, canAudition, shouldAudition, resultName, resultIsSelected, resultsEntryCount, and `filters`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | *(none)* | | | |
+
+**Null until observed (Phase 26, 0.2.4, D-26-12).** `selectedContentType`, `selectedContentTypeIndex`
+(integer), `contentTypeNames`, `resultName` and `resultsEntryCount` are JSON `null` until Bitwig's
+observer for that value has fired; they no longer start at `""`, `0` or `[]`. A reader treats `null`
+as unknown, and an observed `0` as Bitwig's zero. `exists`, `title`, `canAudition`, `shouldAudition`
+and `resultIsSelected` are unchanged.
+
+Each `filters.<column>` (`category`, `tag`, `creator`, `device`, `deviceType`, `fileType`, `location`,
+`smartCollection`) carries:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `exists` | boolean | the column exists |
+| `name` | string or null | the column cursor's selected item |
+| `hitCount` | integer or null | the selected item's hit count |
+| `entryCount` | integer or null | entries in the column |
+| `hasNext` | boolean or null | the column cursor can step forward (Phase 26) |
+| `hasPrevious` | boolean or null | the column cursor can step back (Phase 26) |
+| `wildcardHitCount` | integer or null | the wildcard (Any/All) item's hit count (Phase 26) |
 
 ### `browser/filterSelectNext`
 
@@ -2230,11 +2314,19 @@ Get current state of all 8 filter columns.
 
 ### `browser/getResults`
 
-Get the current result bank (8 items with name and isSelected) plus total entryCount.
+Get the current result bank (8 items with name and isSelected) plus total entryCount and the bank's scroll info.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | *(none)* | | | |
+
+Returns `{items: [{index, name, isSelected} x 8], entryCount, bankSize, scrollPosition, itemCount,
+canScrollBackwards, canScrollForwards}`. `bankSize` is the constructed width, always `8`. Since
+Phase 26 (0.2.4, D-26-14), `entryCount` (integer), `scrollPosition` (integer), `itemCount` (integer),
+`canScrollBackwards` and `canScrollForwards` (booleans) are JSON `null` until observed. An end of
+the list is proven by a `canScroll*` flag reading `false`, not inferred from the names not moving.
+`browser/scrollResults` moves this extension's result-bank window; stage 1 found it does not
+scroll the list Bitwig shows on screen.
 
 ### `browser/scrollResults`
 
