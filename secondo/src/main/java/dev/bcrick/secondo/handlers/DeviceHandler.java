@@ -40,6 +40,7 @@ public class DeviceHandler {
     private static final int PARAM_COUNT = 8;
     private static final long FLUSH_DELAY_MS = 100;
     private static final int CHAIN_NODE_BUDGET = 48;
+    public static final int CHAIN_ROOT_BANK_WIDTH = CHAIN_NODE_BUDGET + 1;
     static final Set<String> VALID_PAGE_TAGS = Set.of(
         "env", "eq", "filter", "fx", "lfo", "mixer", "osc", "perf"
     );
@@ -53,6 +54,7 @@ public class DeviceHandler {
     private final ControllerHost host;
     private final TaskScheduler scheduler;
     private final TrackBankManager trackBankManager;
+    private final DeviceBank[] canonicalDeviceBanks;
     private volatile boolean chainScanInProgress = false;
     private volatile JsonObject chainScanResult = null;
     private volatile int chainScanId = 0;
@@ -75,6 +77,16 @@ public class DeviceHandler {
                          DrumPadBank drumPadBank, DeviceLibrary deviceLibrary,
                          Transport transport, ControllerHost host,
                          TaskScheduler scheduler, TrackBankManager trackBankManager) {
+        this(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank,
+            deviceLibrary, transport, host, scheduler, trackBankManager, null);
+    }
+
+    public DeviceHandler(CursorTrack cursorTrack, CursorDevice cursorDevice,
+                         CursorRemoteControlsPage remoteControlsPage,
+                         DrumPadBank drumPadBank, DeviceLibrary deviceLibrary,
+                         Transport transport, ControllerHost host,
+                         TaskScheduler scheduler, TrackBankManager trackBankManager,
+                         DeviceBank[] canonicalDeviceBanks) {
         this.cursorTrack = cursorTrack;
         this.cursorDevice = cursorDevice;
         this.remoteControlsPage = remoteControlsPage;
@@ -84,6 +96,8 @@ public class DeviceHandler {
         this.host = host;
         this.scheduler = scheduler;
         this.trackBankManager = trackBankManager;
+        this.canonicalDeviceBanks = canonicalDeviceBanks == null
+            ? null : canonicalDeviceBanks.clone();
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -99,7 +113,9 @@ public class DeviceHandler {
                     throw new IllegalStateException("DEVICE_CHAIN_SCAN_IN_PROGRESS");
                 }
                 DeviceChain root = trackBankManager.getCanonicalTrack(trackIndex);
-                ChainScanJob job = new ChainScanJob(root, ++chainScanId);
+                DeviceBank rootBank = canonicalDeviceBanks == null ? null
+                    : canonicalDeviceBanks[trackBankManager.canonicalBankSlot(trackIndex)];
+                ChainScanJob job = new ChainScanJob(root, rootBank, ++chainScanId);
                 chainScanResult = null;
                 chainScanInProgress = true;
                 try {
@@ -721,9 +737,9 @@ public class DeviceHandler {
             abstract void visit();
         }
 
-        ChainScanJob(DeviceChain root, int scanId) {
+        ChainScanJob(DeviceChain root, DeviceBank rootBank, int scanId) {
             this.scanId = scanId;
-            queueDevices(root, new JsonArray(), true);
+            queueDevices(root, rootBank, new JsonArray(), true);
         }
 
         private int remainingBankWidth() {
@@ -783,7 +799,12 @@ public class DeviceHandler {
         }
 
         private void queueDevices(DeviceChain chain, JsonArray parent, boolean topLevel) {
-            pending.addFirst(new ExpandDevices(chain, parent, topLevel));
+            queueDevices(chain, null, parent, topLevel);
+        }
+
+        private void queueDevices(DeviceChain chain, DeviceBank bank,
+                                  JsonArray parent, boolean topLevel) {
+            pending.addFirst(new ExpandDevices(chain, bank, parent, topLevel));
         }
 
         private void queueLayers(Device device, JsonArray parent) {
@@ -800,10 +821,12 @@ public class DeviceHandler {
             private final DeviceWork[] work;
             private final Observed<Integer> total;
 
-            ExpandDevices(DeviceChain chain, JsonArray parent, boolean topLevel) {
+            ExpandDevices(DeviceChain chain, DeviceBank preparedBank,
+                          JsonArray parent, boolean topLevel) {
                 this.parent = parent.deepCopy();
                 this.topLevel = topLevel;
-                DeviceBank bank = chain.createDeviceBank(remainingBankWidth());
+                DeviceBank bank = preparedBank == null
+                    ? chain.createDeviceBank(remainingBankWidth()) : preparedBank;
                 int width = Math.min(remainingBankWidth(), bank.getSizeOfBank());
                 total = observe(bank.itemCount());
                 work = new DeviceWork[width];
@@ -887,7 +910,8 @@ public class DeviceHandler {
                 JsonObject row = new JsonObject();
                 row.addProperty("kind", "device");
                 row.add("path", path.deepCopy());
-                row.add("parentPath", parent.deepCopy());
+                row.add("parentPath", topLevel
+                    ? com.google.gson.JsonNull.INSTANCE : parent.deepCopy());
                 row.addProperty("depth", path.size() - 1);
                 row.addProperty("devicePosition", position);
                 List<String> cold = new ArrayList<>();

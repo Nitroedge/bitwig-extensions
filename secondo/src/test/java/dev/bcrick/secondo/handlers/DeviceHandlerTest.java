@@ -642,6 +642,40 @@ class DeviceHandlerTest {
     }
 
     @Test
+    void listChainUsesInitTimeFlatSlotBankWithoutRuntimeFactory() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        com.bitwig.extension.controller.api.Track root =
+            mock(com.bitwig.extension.controller.api.Track.class);
+        when(manager.getCanonicalTrack(1)).thenReturn(root);
+        when(manager.canonicalBankSlot(1)).thenReturn(2);
+        DeviceBank prepared = mock(DeviceBank.class);
+        when(prepared.getSizeOfBank()).thenReturn(1);
+        doReturn(observedInteger(1)).when(prepared).itemCount();
+        Device device = mock(Device.class);
+        warmDevice(device, "Keys", new String[0], false, false);
+        when(prepared.getItemAt(0)).thenReturn(device);
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[2] = prepared;
+        JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> task.run(), manager, flatSlotBanks)
+            .register(chainDispatcher);
+        chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":1}"));
+        JsonObject result = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":1}")));
+        assertEquals(1, result.get("topLevelDeviceCount").getAsInt());
+        assertEquals(1, result.get("topLevelReturnedCount").getAsInt());
+        assertEquals("Keys", result.getAsJsonArray("nodes").get(0)
+            .getAsJsonObject().get("name").getAsString());
+        assertTrue(result.getAsJsonArray("nodes").get(0)
+            .getAsJsonObject().get("parentPath").isJsonNull());
+        verify(root, never()).createDeviceBank(anyInt());
+        verify(manager).canonicalBankSlot(1);
+        verifyNoInteractions(mockCursorTrack, mockCursorDevice);
+    }
+
+    @Test
     void listChainTraversesPreorderWithin48NodeBudget() {
         TrackBankManager manager = mock(TrackBankManager.class);
         com.bitwig.extension.controller.api.Track root =

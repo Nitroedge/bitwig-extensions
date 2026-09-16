@@ -147,8 +147,11 @@ class StateCacheSnapshotTest {
     @Test
     void snapshot_clip_containsAllFields() {
         populateClip(cache);
+        setClipCursorPosition(cache, 2, 15);
         JsonObject clip = cache.getSnapshot().getAsJsonObject("clip");
 
+        assertEquals(2, clip.get("cursorTrackPosition").getAsInt());
+        assertEquals(15, clip.get("cursorSceneIndex").getAsInt());
         assertEquals("Bass", clip.get("trackName").getAsString());
         assertEquals(8, clip.get("playingStep").getAsInt());
         assertEquals(16.0, clip.get("loopLength").getAsDouble());
@@ -168,6 +171,10 @@ class StateCacheSnapshotTest {
         assertEquals(0.2f, color.get("r").getAsFloat(), 0.01f);
         assertEquals(0.4f, color.get("g").getAsFloat(), 0.01f);
         assertEquals(0.8f, color.get("b").getAsFloat(), 0.01f);
+        setClipCursorPosition(cache, -1, -1);
+        JsonObject cold = cache.getSnapshot().getAsJsonObject("clip");
+        assertTrue(cold.get("cursorTrackPosition").isJsonNull());
+        assertTrue(cold.get("cursorSceneIndex").isJsonNull());
     }
 
     @Test
@@ -343,6 +350,9 @@ class StateCacheSnapshotTest {
         observeTrack(3, "Kick", "Instrument", 2, true, 1, null);
         observeTrack(4, "Bass", "Instrument", 3, true, 0, null);
         observeTrack(5, "Master", "Master", 99, false, null, true);
+        set2DArrayElement(cache, "trackParentEquals", 1, 0, true);
+        set2DArrayElement(cache, "trackParentEquals", 3, 1, true);
+        set2DArrayElement(cache, "trackParentEquals", 4, 0, true);
         for (int i = 6; i < trackCountOf(StateCache.class); i++) {
             setArrayElement(cache, "trackExists", i, false);
         }
@@ -379,6 +389,59 @@ class StateCacheSnapshotTest {
 
         JsonObject master = cache.getSnapshot().getAsJsonObject("master");
         assertFalse(master.get("activated").getAsBoolean());
+    }
+
+    @Test
+    void parentIdentityIgnoresAliasedFlatAndGroupPositions() {
+        observeTrack(0, "Keys", "Instrument", 0, false, null, true);
+        observeTrack(1, "Drums", "Instrument", 1, false, null, true);
+        observeTrack(2, "Group with Hidden Track", "Group", 2, true, 2, true);
+        observeTrack(3, "Bass", "Instrument", 3, true, 2, true);
+        observeTrack(4, "Hidden Track In Group", "Instrument", 4, true, 2, true);
+        observeTrack(5, "Guitar Group", "Group", 5, true, 2, false);
+        observeTrack(6, "Guitar Strat", "Instrument", 6, true, 3, true);
+        observeTrack(7, "Guitar", "Instrument", 7, true, 3, true);
+        set2DArrayElement(cache, "trackParentEquals", 2, 2, true);
+        set2DArrayElement(cache, "trackParentEquals", 3, 2, true);
+        set2DArrayElement(cache, "trackParentEquals", 4, 2, true);
+        set2DArrayElement(cache, "trackParentEquals", 5, 5, true);
+        set2DArrayElement(cache, "trackParentEquals", 6, 5, true);
+        set2DArrayElement(cache, "trackParentEquals", 7, 5, true);
+        for (int i = 8; i < trackCountOf(StateCache.class); i++) {
+            setArrayElement(cache, "trackExists", i, false);
+        }
+        setField(cache, "trackItemCount", 8);
+        setField(cache, "trackItemCountObserved", true);
+
+        StateCache.CanonicalTrackSnapshot all = cache.getCanonicalTrackSnapshot();
+        assertNull(all.rows().get(2).parentIndex(), "root group cannot parent itself");
+        assertEquals(0, all.rows().get(2).depth());
+        assertEquals(2, all.rows().get(3).parentIndex());
+        assertNull(all.rows().get(5).parentIndex(), "second root group is independent");
+        assertEquals(5, all.rows().get(6).parentIndex(),
+            "parent proxy identity wins over an aliased numeric position");
+        assertEquals(1, all.rows().get(6).depth());
+        assertFalse(all.rows().get(6).effectiveActivated(),
+            "observed deactivated Guitar Group folds into its child");
+        assertEquals(List.of(5, 6, 7), cache.getCanonicalTrackSubtree(5).rows()
+            .stream().map(StateCache.CanonicalTrackRow::trackIndex).toList());
+    }
+
+    @Test
+    void coldParentIdentityDoesNotClaimCompleteSubtreeOrActivation() {
+        observeTrack(0, "Group", "Group", 0, false, null, true);
+        observeTrack(1, "Child", "Instrument", 1, true, 0, true);
+        for (int i = 2; i < trackCountOf(StateCache.class); i++) {
+            setArrayElement(cache, "trackExists", i, false);
+        }
+        setField(cache, "trackItemCount", 2);
+        setField(cache, "trackItemCountObserved", true);
+
+        StateCache.CanonicalTrackSnapshot all = cache.getCanonicalTrackSnapshot();
+        assertFalse(all.complete());
+        assertNull(all.rows().get(1).parentIndex());
+        assertNull(all.rows().get(1).effectiveActivated());
+        assertFalse(cache.getCanonicalTrackSubtree(0).complete());
     }
 
     private void observeTrack(

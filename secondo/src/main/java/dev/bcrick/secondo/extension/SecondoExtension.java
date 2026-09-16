@@ -84,6 +84,14 @@ public class SecondoExtension extends ControllerExtension {
             host, SEND_COUNT, SCENE_COUNT
         );
         TrackBank trackBank = trackBankManager.getCanonicalFlatTrackBank();
+        // Bitwig permits object-proxy factories only during driver initialization.
+        // Public indexes are resolved to these physical flat-bank slots at scan time.
+        DeviceBank[] canonicalDeviceBanks = new DeviceBank[TRACK_COUNT];
+        for (int slot = 0; slot < TRACK_COUNT; slot++) {
+            Track track = (Track) trackBank.getItemAt(slot);
+            canonicalDeviceBanks[slot] =
+                track.createDeviceBank(DeviceHandler.CHAIN_ROOT_BANK_WIDTH);
+        }
         trackBank.setShouldShowClipLauncherFeedback(true);
         trackBank.sceneBank().setIndication(true);
         MasterTrack masterTrack = host.createMasterTrack(0);
@@ -211,7 +219,9 @@ public class SecondoExtension extends ControllerExtension {
         new MasterHandler(masterTrack).register(dispatcher);
         new ClipHandler(trackBank, trackBank.sceneBank(), cursorClip, stateCache).register(dispatcher);
         DeviceLibrary deviceLibrary = resolveDeviceLibrary();
-        new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary, transport, host, host::scheduleTask, trackBankManager).register(dispatcher);
+        new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank,
+            deviceLibrary, transport, host, host::scheduleTask, trackBankManager,
+            canonicalDeviceBanks).register(dispatcher);
         new NoteHandler(cursorClip, stateCache).register(dispatcher);
         new ArrangerClipHandler(arrangerClip, stateCache).register(dispatcher);
         new SceneHandler(trackBank.sceneBank(), project, stateCache).register(dispatcher);

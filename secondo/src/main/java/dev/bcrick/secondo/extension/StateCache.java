@@ -57,6 +57,8 @@ public class StateCache {
     private final Integer[] trackPositions = new Integer[TRACK_COUNT];
     private final Boolean[] trackParentExists = new Boolean[TRACK_COUNT];
     private final Integer[] trackParentPositions = new Integer[TRACK_COUNT];
+    // Parent position is not in the flattened bank coordinate. Compare Bitwig proxies instead.
+    private final Boolean[][] trackParentEquals = new Boolean[TRACK_COUNT][TRACK_COUNT];
     private final Boolean[] trackActivations = new Boolean[TRACK_COUNT];
     private final boolean[] trackIdentityRequired = new boolean[TRACK_COUNT];
     private final String[] legacyTrackNames = new String[TRACK_COUNT];
@@ -435,6 +437,14 @@ public class StateCache {
             parentTrack.position().addValueObserver(
                 (IntegerValueChangedCallback) v -> trackParentPositions[idx] = v
             );
+            for (int candidate = 0; candidate < TRACK_COUNT; candidate++) {
+                final int parentCandidate = candidate;
+                Track candidateTrack = (Track) trackBank.getItemAt(candidate);
+                BooleanValue sameTarget = parentTrack.createEqualsValue(candidateTrack);
+                sameTarget.markInterested();
+                sameTarget.addValueObserver((BooleanValueChangedCallback) value ->
+                    trackParentEquals[idx][parentCandidate] = value);
+            }
 
             track.name().markInterested();
             track.name().addValueObserver((StringValueChangedCallback) v -> trackNames[idx] = (String) v);
@@ -1620,16 +1630,17 @@ public class StateCache {
     /** Build the complete bounded non-master view in Bitwig's FLATTEN preorder. */
     public CanonicalTrackSnapshot getCanonicalTrackSnapshot() {
         List<Integer> slots = new ArrayList<>(TRACK_COUNT);
-        Map<Integer, Integer> positionToSlot = new HashMap<>();
         for (int slot = 0; slot < TRACK_COUNT; slot++) {
             if (Boolean.FALSE.equals(trackExists[slot])
                     || "Master".equals(trackTypes[slot])) {
                 continue;
             }
             slots.add(slot);
-            if (trackPositions[slot] != null) {
-                positionToSlot.put(trackPositions[slot], slot);
-            }
+        }
+
+        ParentLink[] parentLinks = new ParentLink[TRACK_COUNT];
+        for (int slot : slots) {
+            parentLinks[slot] = resolveParentLink(slot, slots);
         }
 
         Map<Integer, Integer> slotToPublic = new HashMap<>();
@@ -1641,10 +1652,10 @@ public class StateCache {
         for (int publicIndex = 0; publicIndex < slots.size(); publicIndex++) {
             int slot = slots.get(publicIndex);
             Integer parentIndex = canonicalParentIndex(
-                slot, positionToSlot, slotToPublic
+                slot, parentLinks, slotToPublic
             );
             ActivationFold activation = foldEffectiveActivation(
-                slot, positionToSlot, slotToPublic
+                slot, parentLinks, slotToPublic
             );
             rows.add(new CanonicalTrackRow(
                 publicIndex,
@@ -1652,7 +1663,7 @@ public class StateCache {
                 trackNames[slot] != null ? trackNames[slot] : "",
                 trackTypes[slot] != null ? trackTypes[slot] : "",
                 parentIndex,
-                canonicalDepth(slot, positionToSlot),
+                canonicalDepth(slot, parentLinks),
                 trackActivations[slot],
                 activation.effective(),
                 trackIdentityRequired[slot],
@@ -1663,7 +1674,10 @@ public class StateCache {
             ));
         }
 
-        boolean complete = trackItemCountObserved && trackItemCount <= TRACK_COUNT;
+        boolean hierarchyObserved = slots.stream()
+            .allMatch(slot -> parentLinks[slot].observed());
+        boolean complete = trackItemCountObserved
+            && trackItemCount <= TRACK_COUNT && hierarchyObserved;
         Integer last = rows.isEmpty() ? null : rows.get(rows.size() - 1).trackIndex();
         return new CanonicalTrackSnapshot(
             rows,
@@ -1732,38 +1746,60 @@ public class StateCache {
         return false;
     }
 
-    private Integer canonicalParentIndex(
-            int slot,
-            Map<Integer, Integer> positionToSlot,
-            Map<Integer, Integer> slotToPublic) {
-        if (!Boolean.TRUE.equals(trackParentExists[slot])
-                || trackParentPositions[slot] == null) {
-            return null;
+    private record ParentLink(Integer slot, boolean observed) {}
+
+    /**
+     * Bitwig parent position may use a group-local or main-bank coordinate. ObjectProxy equality
+     * is the only direct comparison against the flattened canonical row, so never infer a parent
+     * from a matching numeric position or name.
+     */
+    private ParentLink resolveParentLink(int slot, List<Integer> visibleSlots) {
+        if (Boolean.FALSE.equals(trackParentExists[slot])) {
+            return new ParentLink(null, true);
         }
-        Integer parentSlot = positionToSlot.get(trackParentPositions[slot]);
-        return parentSlot == null ? null : slotToPublic.get(parentSlot);
+        if (!Boolean.TRUE.equals(trackParentExists[slot])) {
+            return new ParentLink(null, false);
+        }
+        Integer match = null;
+        for (int candidate : visibleSlots) {
+            if (Boolean.TRUE.equals(trackParentEquals[slot][candidate])) {
+                if (match != null) {
+                    return new ParentLink(null, false);
+                }
+                match = candidate;
+            }
+        }
+        if (match == null) {
+            return new ParentLink(null, false);
+        }
+        // Some root group proxies report their own track as parent. That is not a hierarchy edge.
+        return new ParentLink(match.equals(slot) ? null : match, true);
     }
 
-    private int canonicalDepth(int slot, Map<Integer, Integer> positionToSlot) {
+    private Integer canonicalParentIndex(
+            int slot,
+            ParentLink[] links,
+            Map<Integer, Integer> slotToPublic) {
+        ParentLink link = links[slot];
+        return link == null || link.slot() == null ? null : slotToPublic.get(link.slot());
+    }
+
+    private int canonicalDepth(int slot, ParentLink[] links) {
         int depth = 0;
         int current = slot;
         Set<Integer> visited = new HashSet<>();
-        while (Boolean.TRUE.equals(trackParentExists[current])
-                && trackParentPositions[current] != null
-                && visited.add(current)) {
-            Integer parentSlot = positionToSlot.get(trackParentPositions[current]);
-            if (parentSlot == null) {
-                break;
-            }
+        while (visited.add(current)) {
+            ParentLink link = links[current];
+            if (link == null || !link.observed() || link.slot() == null) break;
             depth++;
-            current = parentSlot;
+            current = link.slot();
         }
         return depth;
     }
 
     private ActivationFold foldEffectiveActivation(
             int slot,
-            Map<Integer, Integer> positionToSlot,
+            ParentLink[] links,
             Map<Integer, Integer> slotToPublic) {
         Boolean effective = Boolean.TRUE;
         List<Integer> unobserved = new ArrayList<>();
@@ -1789,20 +1825,13 @@ public class StateCache {
                 }
             }
 
-            if (Boolean.FALSE.equals(trackParentExists[current])) {
-                break;
-            }
-            if (!Boolean.TRUE.equals(trackParentExists[current])
-                    || trackParentPositions[current] == null) {
+            ParentLink link = links[current];
+            if (link == null || !link.observed()) {
                 relationshipUnobserved = true;
                 break;
             }
-            Integer parentSlot = positionToSlot.get(trackParentPositions[current]);
-            if (parentSlot == null) {
-                relationshipUnobserved = true;
-                break;
-            }
-            current = parentSlot;
+            if (link.slot() == null) break;
+            current = link.slot();
         }
 
         if (relationshipUnobserved && !Boolean.FALSE.equals(effective)) {
@@ -2085,6 +2114,17 @@ public class StateCache {
     private JsonObject getClipState() {
         JsonObject obj = new JsonObject();
         obj.addProperty("trackName", clipTrackName);
+        // Existing cursor observers use -1 until read; expose null instead of a fake address.
+        if (clipCursorTrackPosition < 0) {
+            obj.add("cursorTrackPosition", JsonNull.INSTANCE);
+        } else {
+            obj.addProperty("cursorTrackPosition", clipCursorTrackPosition);
+        }
+        if (clipCursorSceneIndex < 0) {
+            obj.add("cursorSceneIndex", JsonNull.INSTANCE);
+        } else {
+            obj.addProperty("cursorSceneIndex", clipCursorSceneIndex);
+        }
         obj.addProperty("playingStep", clipPlayingStep);
         obj.addProperty("loopLength", clipLoopLength);
         obj.addProperty("playStart", clipPlayStart);
