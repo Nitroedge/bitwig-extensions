@@ -56,6 +56,19 @@ public class TrackHandler {
             return new JsonPrimitive("ok");
         });
 
+        // The dispatcher answers synchronously on the control thread. Return the cached
+        // observation honestly; the caller polls later flushes without resending the setter.
+        dispatcher.register("track/setActivated", params -> {
+            int index = requireInt(params, "index");
+            boolean requested = requireBoolean(params, "activated");
+            Track track = trackBankManager.getCanonicalTrack(index);
+            Boolean before = canonicalOwnActivation(index);
+            if (before != null && before == requested) {
+                return activationResponse(index, requested, false, before);
+            }
+            track.isActivated().set(requested);
+            return activationResponse(index, requested, true, canonicalOwnActivation(index));
+        });
         dispatcher.register("track/setMute", params -> {
             Track track = getTrack(params.get("index").getAsInt());
             boolean muted = params.get("muted").getAsBoolean();
@@ -361,6 +374,30 @@ public class TrackHandler {
         });
     }
 
+    private Boolean canonicalOwnActivation(int index) {
+        StateCache.CanonicalTrackSnapshot snapshot = stateCache.getCanonicalTrackSnapshot();
+        for (StateCache.CanonicalTrackRow row : snapshot.rows()) {
+            if (row.trackIndex() == index) {
+                return row.activated();
+            }
+        }
+        return null;
+    }
+
+    private JsonObject activationResponse(
+            int index, boolean requested, boolean dispatched, Boolean observedValue) {
+        JsonObject result = new JsonObject();
+        result.addProperty("trackIndex", index);
+        result.addProperty("requested", requested);
+        result.addProperty("dispatched", dispatched);
+        result.addProperty("observed", observedValue != null);
+        if (observedValue == null) {
+            result.add("activated", com.google.gson.JsonNull.INSTANCE);
+        } else {
+            result.addProperty("activated", observedValue);
+        }
+        return result;
+    }
     private Track getTrack(int index) {
         if (index < 0 || index >= trackBank.getSizeOfBank()) {
             throw new IllegalArgumentException("track index out of range: " + index);

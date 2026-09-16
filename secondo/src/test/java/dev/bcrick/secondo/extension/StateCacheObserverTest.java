@@ -2,11 +2,17 @@ package dev.bcrick.secondo.extension;
 
 import com.bitwig.extension.callback.BooleanValueChangedCallback;
 import com.bitwig.extension.callback.DoubleValueChangedCallback;
+import com.bitwig.extension.callback.IntegerValueChangedCallback;
 import com.bitwig.extension.callback.StringValueChangedCallback;
 import com.bitwig.extension.controller.api.*;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -108,4 +114,40 @@ class StateCacheObserverTest {
 
         assertTrue(cache.getChangedSections().contains("transport"));
     }
+
+    @Test
+    void coldActivationAndItemCountRemainUnobserved() {
+        JsonObject tracks = cache.getSnapshot().getAsJsonObject("tracks");
+        assertFalse(tracks.get("itemCountObserved").getAsBoolean());
+        assertTrue(tracks.get("itemCount").isJsonNull());
+
+        JsonObject first = tracks.getAsJsonArray("tracks").get(0).getAsJsonObject();
+        assertTrue(first.get("activated").isJsonNull());
+        assertTrue(first.get("effectiveActivated").isJsonNull());
+        assertEquals(List.of(0), jsonInts(first.getAsJsonArray("unobservedActivationIndices")));
+
+        Track track0 = (Track) trackBank.getItemAt(0);
+        ArgumentCaptor<BooleanValueChangedCallback> activation =
+            ArgumentCaptor.forClass(BooleanValueChangedCallback.class);
+        verify(track0.isActivated()).addValueObserver(activation.capture());
+        activation.getValue().valueChanged(true);
+
+        ArgumentCaptor<IntegerValueChangedCallback> count =
+            ArgumentCaptor.forClass(IntegerValueChangedCallback.class);
+        verify(trackBank.itemCount()).addValueObserver(count.capture());
+        count.getValue().valueChanged(7);
+
+        JsonObject observed = cache.getSnapshot().getAsJsonObject("tracks");
+        assertTrue(observed.get("itemCountObserved").getAsBoolean());
+        assertEquals(7, observed.get("itemCount").getAsInt());
+        assertTrue(observed.getAsJsonArray("tracks").get(0).getAsJsonObject()
+            .get("activated").getAsBoolean());
+    }
+
+    private static List<Integer> jsonInts(JsonArray values) {
+        List<Integer> result = new ArrayList<>();
+        values.forEach(value -> result.add(value.getAsInt()));
+        return result;
+    }
+
 }

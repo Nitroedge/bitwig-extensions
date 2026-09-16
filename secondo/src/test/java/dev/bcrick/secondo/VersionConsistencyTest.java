@@ -80,9 +80,9 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.1",
+            "0.2.2",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.1 (secondo decision D-21-H, phase 21; bumped "
+            "The engine's version is 0.2.2 (secondo Phase 25, seventh pin move; bumped "
                 + "from 0.2.0 by secondo phase 23 plan 23-09 at the sixth pin move, so "
                 + "that diagnose's version row can tell a build carrying the verified "
                 + "launcher write from one that does not). This "

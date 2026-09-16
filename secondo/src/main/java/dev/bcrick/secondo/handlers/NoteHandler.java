@@ -16,6 +16,7 @@ public class NoteHandler {
 
     private static final int GRID_WIDTH = 256;
     private static final int GRID_HEIGHT = 128;
+    private static final int MIDI_VELOCITY_MAX = 127;
     // Step size that makes 256 grid steps cover 1024 beats (256 bars in 4/4)
     private static final double WIDE_STEP_SIZE = 4.0;
 
@@ -25,6 +26,11 @@ public class NoteHandler {
     public NoteHandler(Clip cursorClip, StateCache stateCache) {
         this.cursorClip = cursorClip;
         this.stateCache = stateCache;
+    }
+
+    static int normalizedVelocityToMidi(double normalizedVelocity) {
+        long rounded = Math.round(normalizedVelocity * MIDI_VELOCITY_MAX);
+        return (int) Math.max(0, Math.min(MIDI_VELOCITY_MAX, rounded));
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -46,7 +52,7 @@ public class NoteHandler {
                         "note y=" + y + " is out of range (0-" + (GRID_HEIGHT - 1) + ").");
                 }
                 int velocity = note.has("velocity")
-                    ? (int) (note.get("velocity").getAsDouble() * 127)
+                    ? normalizedVelocityToMidi(note.get("velocity").getAsDouble())
                     : 100;
                 double duration = note.has("duration")
                     ? note.get("duration").getAsDouble()

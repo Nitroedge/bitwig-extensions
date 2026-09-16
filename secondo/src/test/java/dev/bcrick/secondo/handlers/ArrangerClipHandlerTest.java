@@ -163,13 +163,10 @@ class ArrangerClipHandlerTest {
         JsonObject result = JsonParser.parseString(response).getAsJsonObject()
             .getAsJsonObject("result");
 
-        // Finding F1, pinned. The dispatcher's Gson is a bare `new Gson()` with no
-        // serializeNulls(), so a field no observer has written does not arrive as
-        // `"exists": null` — the key VANISHES from the wire entirely. That is the strongest
-        // available form of "absent means absent", and it is the contract: a consumer must ask
-        // whether the key is present, not whether its value is null, and must never be handed a
-        // 0.0 or "" standing in for a value nobody read.
-        assertFalse(result.has("exists"), "an unobserved field must be absent, not null, not zero");
+        // Finding F1, pinned. StateCache explicitly omits arranger fields no observer
+        // has written. The dispatcher now preserves intentional JsonNull members for
+        // other RPCs, but this surface still means "absent means absent": consumers
+        // must ask whether the key is present, not compare it with null or a default.        assertFalse(result.has("exists"), "an unobserved field must be absent, not null, not zero");
         assertFalse(result.has("loopLength"));
         assertFalse(result.has("playStart"));
         assertFalse(result.has("color"));
@@ -329,17 +326,15 @@ class ArrangerClipHandlerTest {
         // The reply still reports the widen, because the widen genuinely happened on the Bitwig
         // clip. The reply describes a dispatch; the cache describes what somebody chose.
         assertContains(response, "\"stepSize\":4.0");
-        // And the absence is visible where it matters. JsonRpcDispatcher builds a bare
-        // new Gson() with no serializeNulls(), so a null member is DROPPED from the payload —
-        // getState omits stepSize entirely rather than publishing 4.0 or null.
+        // And the absence is visible where it matters, before and after serialization.
         JsonObject state = stateCache.getArrangerClipState();
-        assertTrue(state.get("stepSize").isJsonNull(),
-            "getState must not carry a stepSize value nobody set");
-        assertFalse(new com.google.gson.Gson().toJson(state).contains("stepSize"),
-            "the serialised getState payload must omit stepSize entirely, so a caller can tell "
-            + "'nobody set a grid' apart from 'somebody set 4.0'");
+        assertFalse(state.has("stepSize"),
+            "getState must omit a stepSize nobody set");
+        JsonObject result = JsonParser.parseString(dispatcher.handle(
+            rpc("arrangerClip/getState", "{}"))).getAsJsonObject().getAsJsonObject("result");
+        assertFalse(result.has("stepSize"),
+            "the wire must omit stepSize, so a caller can distinguish an unchosen grid");
     }
-
     @Test
     void clearAllNotesRestoresAndCachesAPreviouslySetStepSize() {
         dispatcher.handle(rpc("arrangerClip/setStepSize", "{\"size\":0.5}"));

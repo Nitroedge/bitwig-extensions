@@ -5,6 +5,12 @@ import com.bitwig.extension.controller.api.CursorDevice;
 import com.bitwig.extension.controller.api.CursorRemoteControlsPage;
 import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.DrumPadBank;
+import com.bitwig.extension.controller.api.Device;
+import com.bitwig.extension.controller.api.DeviceBank;
+import com.bitwig.extension.controller.api.DeviceLayer;
+import com.bitwig.extension.controller.api.DeviceLayerBank;
+import com.bitwig.extension.controller.api.DrumPad;
+import com.bitwig.extension.controller.api.BooleanValue;
 import com.bitwig.extension.controller.api.InsertionPoint;
 import com.bitwig.extension.controller.api.RemoteControl;
 import com.bitwig.extension.controller.api.SettableBooleanValue;
@@ -15,6 +21,8 @@ import com.bitwig.extension.controller.api.StringArrayValue;
 import com.bitwig.extension.controller.api.StringValue;
 import com.bitwig.extension.controller.api.IntegerValue;
 import com.bitwig.extension.controller.api.Transport;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -121,8 +129,8 @@ class DeviceHandlerTest {
     }
 
     @Test
-    void registersExactlyThirtyFourMethods() {
-        assertEquals(34, dispatcher.getRegisteredMethods().size());
+    void registersExactlyThirtySixMethods() {
+        assertEquals(36, dispatcher.getRegisteredMethods().size());
     }
 
     // --- device/hasAutomation validation ---
@@ -631,6 +639,252 @@ class DeviceHandlerTest {
         // Task 2: write page 1 params
         scheduledTasks.get(2).run();
         verify(mockVal2).setImmediately(0.9);
+    }
+
+    @Test
+    void listChainTraversesPreorderWithin48NodeBudget() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        com.bitwig.extension.controller.api.Track root =
+            mock(com.bitwig.extension.controller.api.Track.class);
+        DeviceBank rootBank = mock(DeviceBank.class);
+        when(manager.getCanonicalTrack(0)).thenReturn(root);
+        when(root.createDeviceBank(anyInt())).thenReturn(rootBank);
+        when(rootBank.getSizeOfBank()).thenReturn(49);
+        doReturn(observedInteger(17)).when(rootBank).itemCount();
+
+        Device rack = mock(Device.class);
+        warmDevice(rack, "Drum Machine", new String[0], false, true);
+        DrumPadBank pads = mock(DrumPadBank.class);
+        when(rack.createDrumPadBank(128)).thenReturn(pads);
+        for (int note = 0; note < 128; note++) {
+            DrumPad pad = mock(DrumPad.class);
+            when(pads.getItemAt(note)).thenReturn(pad);
+            if (note >= 36 && note < 52) {
+                doReturn(observedBoolean(true)).when(pad).exists();
+                doReturn(observedName("Pad " + note)).when(pad).name();
+                DeviceBank childBank = mock(DeviceBank.class);
+                when(pad.createDeviceBank(anyInt())).thenReturn(childBank);
+                when(childBank.getSizeOfBank()).thenReturn(1);
+                doReturn(observedInteger(1)).when(childBank).itemCount();
+                Device child = mock(Device.class);
+                warmDevice(child, "Sampler " + note, new String[0], false, false);
+                when(childBank.getItemAt(0)).thenReturn(child);
+            } else doReturn(observedBoolean(false)).when(pad).exists();
+        }
+        when(rootBank.getItemAt(0)).thenReturn(rack);
+        for (int position = 1; position <= 16; position++) {
+            Device effect = mock(Device.class);
+            warmDevice(effect, "Effect " + position, new String[0], false, false);
+            when(rootBank.getItemAt(position)).thenReturn(effect);
+        }
+        for (int position = 17; position < 49; position++) {
+            Device absent = mock(Device.class);
+            doReturn(observedBoolean(false)).when(absent).exists();
+            when(rootBank.getItemAt(position)).thenReturn(absent);
+        }
+
+        JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> task.run(), manager).register(chainDispatcher);
+        String started = chainDispatcher.handle(rpc("device/listChain",
+            "{\"trackIndex\":0}"));
+        assertContains(started, "\"scanId\":1");
+        JsonObject result = rpcResult(chainDispatcher.handle(rpc("device/getChainResult",
+            "{\"scanId\":1}")));
+        JsonArray nodes = result.getAsJsonArray("nodes");
+        assertEquals(48, nodes.size(), "node 49 must not be returned");
+        assertEquals(48, result.get("returnedCount").getAsInt());
+        assertEquals(17, result.get("topLevelDeviceCount").getAsInt());
+        assertEquals(16, result.get("topLevelReturnedCount").getAsInt());
+        JsonObject kinds = result.getAsJsonObject("returnedNodeCounts");
+        assertEquals(32, kinds.get("devices").getAsInt());
+        assertEquals(16, kinds.get("pads").getAsInt());
+        assertEquals(0, kinds.get("layers").getAsInt());
+        assertEquals("device", nodes.get(32).getAsJsonObject()
+            .get("kind").getAsString(), "rack is 1 + 16 pad + 16 child nodes");
+        assertEquals("device", nodes.get(33).getAsJsonObject()
+            .get("kind").getAsString(), "following effect starts at node 34");
+        assertEquals("device", nodes.get(0).getAsJsonObject().get("kind").getAsString());
+        assertEquals("pad", nodes.get(1).getAsJsonObject().get("kind").getAsString());
+        assertEquals(36, nodes.get(1).getAsJsonObject().get("note").getAsInt());
+        assertEquals("device", nodes.get(2).getAsJsonObject().get("kind").getAsString());
+        JsonArray padChildPath = nodes.get(2).getAsJsonObject().getAsJsonArray("path");
+        assertEquals(3, padChildPath.size());
+        assertEquals(0, padChildPath.get(0).getAsJsonObject()
+            .get("devicePosition").getAsInt());
+        assertEquals(36, padChildPath.get(1).getAsJsonObject().get("note").getAsInt());
+        assertEquals(0, padChildPath.get(2).getAsJsonObject()
+            .get("devicePosition").getAsInt());
+        assertEquals(15, result.getAsJsonArray("lastReturnedPath").get(0)
+            .getAsJsonObject().get("devicePosition").getAsInt());
+        assertFalse(result.get("complete").getAsBoolean());
+        assertContains(result.toString(), "DEVICE_CHAIN_TRUNCATED");
+        assertContains(result.toString(), "devicePosition");
+
+        // A separate reachable layer graph proves empty containers are rows.
+        Device layerDevice = mock(Device.class);
+        warmDevice(layerDevice, "Instrument Layer", new String[0], true, false);
+        DeviceLayerBank layerBank = mock(DeviceLayerBank.class);
+        when(layerDevice.createLayerBank(anyInt())).thenReturn(layerBank);
+        when(layerBank.getSizeOfBank()).thenReturn(2);
+        doReturn(observedInteger(2)).when(layerBank).itemCount();
+        for (int index = 0; index < 2; index++) {
+            DeviceLayer layer = mock(DeviceLayer.class);
+            when(layerBank.getItemAt(index)).thenReturn(layer);
+            doReturn(observedBoolean(true)).when(layer).exists();
+            doReturn(observedName("Layer " + index)).when(layer).name();
+            DeviceBank empty = mock(DeviceBank.class);
+            when(layer.createDeviceBank(anyInt())).thenReturn(empty);
+            when(empty.getSizeOfBank()).thenReturn(1);
+            doReturn(observedInteger(0)).when(empty).itemCount();
+            Device absent = mock(Device.class);
+            doReturn(observedBoolean(false)).when(absent).exists();
+            when(empty.getItemAt(0)).thenReturn(absent);
+        }
+        DeviceBank layerRootBank = mock(DeviceBank.class);
+        when(layerRootBank.getSizeOfBank()).thenReturn(1);
+        doReturn(observedInteger(1)).when(layerRootBank).itemCount();
+        when(layerRootBank.getItemAt(0)).thenReturn(layerDevice);
+        when(root.createDeviceBank(anyInt())).thenReturn(layerRootBank);
+        chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}"));
+        JsonObject layersResult = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":2}")));
+        JsonArray layerNodes = layersResult.getAsJsonArray("nodes");
+        assertEquals(3, layerNodes.size());
+        assertEquals("layer", layerNodes.get(1).getAsJsonObject()
+            .get("kind").getAsString());
+        assertEquals("layer", layerNodes.get(2).getAsJsonObject()
+            .get("kind").getAsString());
+        assertEquals(0, layerNodes.get(1).getAsJsonObject().get("layerIndex").getAsInt());
+        assertEquals(1, layerNodes.get(2).getAsJsonObject().get("layerIndex").getAsInt());
+        assertEquals(2, layerNodes.get(1).getAsJsonObject()
+            .getAsJsonArray("path").size());
+        assertEquals(3, layersResult.get("returnedCount").getAsInt());
+        verifyNoInteractions(mockCursorTrack, mockCursorDevice);
+    }
+
+    @Test
+    void listChainReportsOpaqueSlotsColdFieldsAndNeverMovesCursor() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        com.bitwig.extension.controller.api.Track root =
+            mock(com.bitwig.extension.controller.api.Track.class);
+        when(manager.getCanonicalTrack(0)).thenReturn(root);
+        DeviceBank bank = mock(DeviceBank.class);
+        when(root.createDeviceBank(anyInt())).thenReturn(bank);
+        when(bank.getSizeOfBank()).thenReturn(1);
+        doReturn(mock(IntegerValue.class)).when(bank).itemCount(); // cold count
+        Device device = mock(Device.class);
+        doReturn(observedBoolean(true)).when(device).exists();
+        doReturn(observedName("FX Layer")).when(device).name();
+        doReturn(mock(BooleanValue.class)).when(device).isPlugin(); // cold field
+        doReturn(observedEnabled(false)).when(device).isEnabled();
+        doReturn(observedSlots("FX", "Post FX")).when(device).slotNames();
+        doReturn(observedBoolean(false)).when(device).hasLayers();
+        doReturn(observedBoolean(false)).when(device).hasDrumPads();
+        when(bank.getItemAt(0)).thenReturn(device);
+
+        List<Runnable> scheduled = new ArrayList<>();
+        JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> scheduled.add(task), manager).register(chainDispatcher);
+        String started = chainDispatcher.handle(rpc("device/listChain",
+            "{\"trackIndex\":0}"));
+        assertContains(started, "\"scanId\":1");
+        String overlap = chainDispatcher.handle(rpc("device/listChain",
+            "{\"trackIndex\":0}"));
+        assertContains(overlap, "DEVICE_CHAIN_SCAN_IN_PROGRESS");
+        assertContains(chainDispatcher.handle(rpc("device/getChainResult",
+            "{\"scanId\":1}")), "\"scanning\":true");
+        for (int i = 0; i < scheduled.size(); i++) scheduled.get(i).run();
+        JsonObject result = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":1}")));
+        assertEquals(1, result.get("returnedCount").getAsInt());
+        assertTrue(result.get("topLevelDeviceCount").isJsonNull());
+        assertEquals(1, result.get("topLevelReturnedCount").getAsInt());
+        assertFalse(result.get("complete").getAsBoolean());
+        JsonObject row = result.getAsJsonArray("nodes").get(0).getAsJsonObject();
+        assertTrue(row.get("isPlugin").isJsonNull());
+        assertFalse(row.get("isEnabled").getAsBoolean());
+        assertEquals(2, row.getAsJsonArray("slotNames").size());
+        assertTrue(row.has("hasLayers"));
+        assertTrue(row.has("hasDrumPads"));
+        assertContains(result.toString(), "DEVICE_FIELD_UNOBSERVED");
+        assertContains(result.toString(), "DEVICE_TOP_LEVEL_COUNT_UNOBSERVED");
+        assertContains(result.toString(), "DEVICE_SLOT_CONTENTS_UNAVAILABLE");
+        assertFalse(result.toString().contains("DEVICE_CHAIN_TRUNCATED"));
+        assertContains(chainDispatcher.handle(rpc("device/getChainResult",
+            "{\"scanId\":2}")), "DEVICE_CHAIN_SCAN_ID_MISMATCH");
+        verifyNoInteractions(mockCursorTrack, mockCursorDevice);
+    }
+
+    private static JsonObject rpcResult(String response) {
+        return com.google.gson.JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonObject("result");
+    }
+
+    private static IntegerValue observedInteger(int value) {
+        IntegerValue observed = mock(IntegerValue.class);
+        doAnswer(call -> {
+            ((com.bitwig.extension.callback.IntegerValueChangedCallback)
+                call.getArgument(0)).valueChanged(value);
+            return null;
+        }).when(observed).addValueObserver(any());
+        return observed;
+    }
+
+    private static BooleanValue observedBoolean(boolean value) {
+        BooleanValue observed = mock(BooleanValue.class);
+        doAnswer(call -> {
+            ((com.bitwig.extension.callback.BooleanValueChangedCallback)
+                call.getArgument(0)).valueChanged(value);
+            return null;
+        }).when(observed).addValueObserver(any());
+        return observed;
+    }
+
+    private static SettableBooleanValue observedEnabled(boolean value) {
+        SettableBooleanValue observed = mock(SettableBooleanValue.class);
+        doAnswer(call -> {
+            ((com.bitwig.extension.callback.BooleanValueChangedCallback)
+                call.getArgument(0)).valueChanged(value);
+            return null;
+        }).when(observed).addValueObserver(any());
+        return observed;
+    }
+
+    private static SettableStringValue observedName(String value) {
+        SettableStringValue observed = mock(SettableStringValue.class);
+        doAnswer(call -> {
+            ((com.bitwig.extension.callback.StringValueChangedCallback)
+                call.getArgument(0)).valueChanged(value);
+            return null;
+        }).when(observed).addValueObserver(any());
+        return observed;
+    }
+
+    private static StringArrayValue observedSlots(String... names) {
+        StringArrayValue observed = mock(StringArrayValue.class);
+        doAnswer(call -> {
+            @SuppressWarnings("unchecked")
+            com.bitwig.extension.callback.ObjectValueChangedCallback<String[]> callback =
+                call.getArgument(0);
+            callback.valueChanged(names);
+            return null;
+        }).when(observed).addValueObserver(any());
+        return observed;
+    }
+
+    private static void warmDevice(Device device, String name, String[] slots,
+                                   boolean layers, boolean pads) {
+        doReturn(observedBoolean(true)).when(device).exists();
+        doReturn(observedName(name)).when(device).name();
+        doReturn(observedBoolean(false)).when(device).isPlugin();
+        doReturn(observedEnabled(true)).when(device).isEnabled();
+        doReturn(observedSlots(slots)).when(device).slotNames();
+        doReturn(observedBoolean(layers)).when(device).hasLayers();
+        doReturn(observedBoolean(pads)).when(device).hasDrumPads();
     }
 
     // --- device/discoverAll behavioral ---

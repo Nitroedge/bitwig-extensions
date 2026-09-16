@@ -1731,11 +1731,22 @@ Remove the currently selected device from the cursor track's device chain.
 
 ### `device/getDrumPads`
 
-Returns drum pad names and MIDI note numbers for the current device. Only works when `hasDrumPads` is true.
+Read the named pads observed on the current cursor device. The handler checks `CursorDevice#hasDrumPads()` and then scans the engine's 128-entry `DrumPadBank`; it does not take a device or track selector.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | *(none)* | | | |
+
+The result is a JSON array. Each returned pad has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `note` | integer | Zero-based MIDI key number, 0-127; this is not a 1-based pad ordinal. |
+| `name` | string | The pad name observed from Bitwig. |
+
+Pads whose `exists` observer is false, or whose observed name is null or empty, are omitted. This is an observer-backed snapshot of the current cursor device: the call does not navigate, wait for a later observer flush, or enumerate device contents inside named FX slots. Layers and drum pads are traversable, but arbitrary named FX-slot contents remain opaque under Controller API v25.
+
+When the current device's observed `hasDrumPads` value is false, the handler returns JSON-RPC error `-32603` with message `Internal error: Current device has no drum pads`. This means the registered method ran but the current device did not expose pads; an unregistered method would instead return `-32601`.
 
 ### `device/enterSlot`
 
@@ -1764,11 +1775,13 @@ Navigate into a nested layer's device chain. Provide either `index` or `name`.
 
 ### `device/enterKeyPad`
 
-Navigate into a drum pad's device chain by MIDI key.
+Navigate the current cursor device into a drum pad's device chain with `CursorDevice#selectFirstInKeyPad(key)`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `key` | integer | yes | MIDI note number (0-127) |
+| `key` | integer | yes | Zero-based MIDI key number (0-127), matching `device/getDrumPads[].note`. |
+
+A valid call returns the string `"ok"` after requesting the cursor move. The result acknowledges dispatch only; the handler does not read back the selected pad or wait for the asynchronous cursor observation. A missing key or a value outside 0-127 returns JSON-RPC error `-32602` with an `Invalid params:` message.
 
 ### `device/selectPageByTag`
 

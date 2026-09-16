@@ -17,7 +17,12 @@ import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public class StateCache {
 
@@ -48,6 +53,14 @@ public class StateCache {
     private final String[] trackTypes = new String[TRACK_COUNT];
     private final boolean[] trackIsGroup = new boolean[TRACK_COUNT];
     private final boolean[] trackIsGroupExpanded = new boolean[TRACK_COUNT];
+    private final Boolean[] trackExists = new Boolean[TRACK_COUNT];
+    private final Integer[] trackPositions = new Integer[TRACK_COUNT];
+    private final Boolean[] trackParentExists = new Boolean[TRACK_COUNT];
+    private final Integer[] trackParentPositions = new Integer[TRACK_COUNT];
+    private final Boolean[] trackActivations = new Boolean[TRACK_COUNT];
+    private final boolean[] trackIdentityRequired = new boolean[TRACK_COUNT];
+    private final String[] legacyTrackNames = new String[TRACK_COUNT];
+    private final Integer[] legacyTrackPositions = new Integer[TRACK_COUNT];
     private volatile boolean[] trackCanHoldNoteData = new boolean[TRACK_COUNT];
     private volatile boolean[] trackCanHoldAudioData = new boolean[TRACK_COUNT];
     private volatile boolean[] trackMutedBySolo = new boolean[TRACK_COUNT];
@@ -84,6 +97,7 @@ public class StateCache {
     // Track bank scroll state
     private volatile int trackScrollPosition;
     private volatile int trackItemCount;
+    private volatile boolean trackItemCountObserved;
     private volatile boolean trackCanScrollForwards;
     private volatile boolean trackCanScrollBackwards;
 
@@ -92,6 +106,7 @@ public class StateCache {
     private volatile double masterPan;
     private volatile boolean masterMute;
     private volatile boolean masterSolo;
+    private volatile Boolean masterActivated;
     private final float[] masterColor = new float[3];
 
     // Device state (cursor device)
@@ -404,6 +419,23 @@ public class StateCache {
             final int idx = i;
             Track track = (Track) trackBank.getItemAt(i);
 
+            track.exists().markInterested();
+            track.exists().addValueObserver((BooleanValueChangedCallback) v -> trackExists[idx] = v);
+
+            track.position().markInterested();
+            track.position().addValueObserver((IntegerValueChangedCallback) v -> trackPositions[idx] = v);
+
+            track.isActivated().markInterested();
+            track.isActivated().addValueObserver((BooleanValueChangedCallback) v -> trackActivations[idx] = v);
+
+            Track parentTrack = track.createParentTrack(0, 0);
+            parentTrack.exists().markInterested();
+            parentTrack.exists().addValueObserver((BooleanValueChangedCallback) v -> trackParentExists[idx] = v);
+            parentTrack.position().markInterested();
+            parentTrack.position().addValueObserver(
+                (IntegerValueChangedCallback) v -> trackParentPositions[idx] = v
+            );
+
             track.name().markInterested();
             track.name().addValueObserver((StringValueChangedCallback) v -> trackNames[idx] = (String) v);
             trackNames[i] = "";
@@ -459,6 +491,11 @@ public class StateCache {
         masterTrack.solo().markInterested();
         masterTrack.solo().addValueObserver((BooleanValueChangedCallback) v -> masterSolo = v);
 
+        masterTrack.isActivated().markInterested();
+        masterTrack.isActivated().addValueObserver(
+            (BooleanValueChangedCallback) v -> masterActivated = v
+        );
+
         masterTrack.color().markInterested();
         masterTrack.color().addValueObserver((ColorValueChangedCallback) (r, g, b) -> {
             masterColor[0] = r;
@@ -513,7 +550,10 @@ public class StateCache {
         trackBank.scrollPosition().addValueObserver((IntegerValueChangedCallback) v -> trackScrollPosition = v);
 
         trackBank.itemCount().markInterested();
-        trackBank.itemCount().addValueObserver((IntegerValueChangedCallback) v -> trackItemCount = v);
+        trackBank.itemCount().addValueObserver((IntegerValueChangedCallback) v -> {
+            trackItemCount = v;
+            trackItemCountObserved = true;
+        });
 
         trackBank.canScrollForwards().markInterested();
         trackBank.canScrollForwards().addValueObserver((BooleanValueChangedCallback) v -> trackCanScrollForwards = v);
@@ -1516,19 +1556,336 @@ public class StateCache {
         return obj;
     }
 
+
+    /**
+     * Immutable request-time view of one canonical, non-master track row.
+     *
+     * <p>Observer callbacks update the backing arrays independently. Building records for each
+     * request prevents a handler from retaining a mutable array view across Bitwig flushes.</p>
+     */
+    public record CanonicalTrackRow(
+            int trackIndex,
+            int bankSlot,
+            String name,
+            String type,
+            Integer parentIndex,
+            int depth,
+            Boolean activated,
+            Boolean effectiveActivated,
+            boolean identityRequired,
+            String legacyName,
+            Integer legacyPosition,
+            Integer position,
+            List<Integer> unobservedActivationIndices) {
+        public CanonicalTrackRow {
+            unobservedActivationIndices = List.copyOf(unobservedActivationIndices);
+        }
+    }
+
+    /** A bounded canonical track snapshot with item-count observation kept explicit. */
+    public record CanonicalTrackSnapshot(
+            List<CanonicalTrackRow> rows,
+            boolean itemCountObserved,
+            Integer itemCount,
+            int bankSize,
+            boolean complete,
+            Integer lastReturnedTrackIndex) {
+        public CanonicalTrackSnapshot {
+            rows = List.copyOf(rows);
+        }
+    }
+
+    private record ActivationFold(Boolean effective, List<Integer> unobservedIndices) {}
+
+    /**
+     * Receives the comparison-bank evidence computed by {@code TrackBankManager}.
+     *
+     * <p>The evidence is stored against the physical flat-bank slot. The immutable snapshot maps
+     * it to the public non-master index, so master placement cannot shift the risk flag onto the
+     * wrong row.</p>
+     */
+    public void updateTrackMigrationObservation(
+            int bankSlot,
+            boolean identityRequired,
+            String legacyName,
+            Integer legacyPosition) {
+        if (bankSlot < 0 || bankSlot >= TRACK_COUNT) {
+            return;
+        }
+        trackIdentityRequired[bankSlot] = identityRequired;
+        legacyTrackNames[bankSlot] = legacyName;
+        legacyTrackPositions[bankSlot] = legacyPosition;
+    }
+
+    /** Build the complete bounded non-master view in Bitwig's FLATTEN preorder. */
+    public CanonicalTrackSnapshot getCanonicalTrackSnapshot() {
+        List<Integer> slots = new ArrayList<>(TRACK_COUNT);
+        Map<Integer, Integer> positionToSlot = new HashMap<>();
+        for (int slot = 0; slot < TRACK_COUNT; slot++) {
+            if (Boolean.FALSE.equals(trackExists[slot])
+                    || "Master".equals(trackTypes[slot])) {
+                continue;
+            }
+            slots.add(slot);
+            if (trackPositions[slot] != null) {
+                positionToSlot.put(trackPositions[slot], slot);
+            }
+        }
+
+        Map<Integer, Integer> slotToPublic = new HashMap<>();
+        for (int publicIndex = 0; publicIndex < slots.size(); publicIndex++) {
+            slotToPublic.put(slots.get(publicIndex), publicIndex);
+        }
+
+        List<CanonicalTrackRow> rows = new ArrayList<>(slots.size());
+        for (int publicIndex = 0; publicIndex < slots.size(); publicIndex++) {
+            int slot = slots.get(publicIndex);
+            Integer parentIndex = canonicalParentIndex(
+                slot, positionToSlot, slotToPublic
+            );
+            ActivationFold activation = foldEffectiveActivation(
+                slot, positionToSlot, slotToPublic
+            );
+            rows.add(new CanonicalTrackRow(
+                publicIndex,
+                slot,
+                trackNames[slot] != null ? trackNames[slot] : "",
+                trackTypes[slot] != null ? trackTypes[slot] : "",
+                parentIndex,
+                canonicalDepth(slot, positionToSlot),
+                trackActivations[slot],
+                activation.effective(),
+                trackIdentityRequired[slot],
+                legacyTrackNames[slot],
+                legacyTrackPositions[slot],
+                trackPositions[slot],
+                activation.unobservedIndices()
+            ));
+        }
+
+        boolean complete = trackItemCountObserved && trackItemCount <= TRACK_COUNT;
+        Integer last = rows.isEmpty() ? null : rows.get(rows.size() - 1).trackIndex();
+        return new CanonicalTrackSnapshot(
+            rows,
+            trackItemCountObserved,
+            trackItemCountObserved ? trackItemCount : null,
+            TRACK_COUNT,
+            complete,
+            last
+        );
+    }
+
+    /**
+     * Return one row and every recursively linked descendant, retaining flat preorder.
+     *
+     * <p>Membership follows parent links rather than adjacency or names, so nested descendants
+     * remain discoverable even when unrelated rows are interleaved in the observed bank.</p>
+     */
+    public CanonicalTrackSnapshot getCanonicalTrackSubtree(int rootTrackIndex) {
+        CanonicalTrackSnapshot all = getCanonicalTrackSnapshot();
+        if (rootTrackIndex < 0 || rootTrackIndex >= all.rows().size()) {
+            return new CanonicalTrackSnapshot(
+                List.of(),
+                all.itemCountObserved(),
+                all.itemCount(),
+                all.bankSize(),
+                all.complete(),
+                null
+            );
+        }
+
+        Map<Integer, CanonicalTrackRow> byIndex = new HashMap<>();
+        for (CanonicalTrackRow row : all.rows()) {
+            byIndex.put(row.trackIndex(), row);
+        }
+        List<CanonicalTrackRow> subtree = new ArrayList<>();
+        for (CanonicalTrackRow row : all.rows()) {
+            if (row.trackIndex() == rootTrackIndex
+                    || descendsFrom(row, rootTrackIndex, byIndex)) {
+                subtree.add(row);
+            }
+        }
+        Integer last = subtree.isEmpty() ? null : subtree.get(subtree.size() - 1).trackIndex();
+        return new CanonicalTrackSnapshot(
+            subtree,
+            all.itemCountObserved(),
+            all.itemCount(),
+            all.bankSize(),
+            all.complete(),
+            last
+        );
+    }
+
+    private static boolean descendsFrom(
+            CanonicalTrackRow row,
+            int rootTrackIndex,
+            Map<Integer, CanonicalTrackRow> byIndex) {
+        Set<Integer> visited = new HashSet<>();
+        Integer parent = row.parentIndex();
+        while (parent != null && visited.add(parent)) {
+            if (parent == rootTrackIndex) {
+                return true;
+            }
+            CanonicalTrackRow parentRow = byIndex.get(parent);
+            parent = parentRow == null ? null : parentRow.parentIndex();
+        }
+        return false;
+    }
+
+    private Integer canonicalParentIndex(
+            int slot,
+            Map<Integer, Integer> positionToSlot,
+            Map<Integer, Integer> slotToPublic) {
+        if (!Boolean.TRUE.equals(trackParentExists[slot])
+                || trackParentPositions[slot] == null) {
+            return null;
+        }
+        Integer parentSlot = positionToSlot.get(trackParentPositions[slot]);
+        return parentSlot == null ? null : slotToPublic.get(parentSlot);
+    }
+
+    private int canonicalDepth(int slot, Map<Integer, Integer> positionToSlot) {
+        int depth = 0;
+        int current = slot;
+        Set<Integer> visited = new HashSet<>();
+        while (Boolean.TRUE.equals(trackParentExists[current])
+                && trackParentPositions[current] != null
+                && visited.add(current)) {
+            Integer parentSlot = positionToSlot.get(trackParentPositions[current]);
+            if (parentSlot == null) {
+                break;
+            }
+            depth++;
+            current = parentSlot;
+        }
+        return depth;
+    }
+
+    private ActivationFold foldEffectiveActivation(
+            int slot,
+            Map<Integer, Integer> positionToSlot,
+            Map<Integer, Integer> slotToPublic) {
+        Boolean effective = Boolean.TRUE;
+        List<Integer> unobserved = new ArrayList<>();
+        Set<Integer> visited = new HashSet<>();
+        int current = slot;
+        boolean relationshipUnobserved = false;
+
+        while (true) {
+            if (!visited.add(current)) {
+                relationshipUnobserved = true;
+                break;
+            }
+            Boolean own = trackActivations[current];
+            if (Boolean.FALSE.equals(own)) {
+                effective = Boolean.FALSE;
+            } else if (own == null) {
+                Integer publicIndex = slotToPublic.get(current);
+                if (publicIndex != null) {
+                    unobserved.add(publicIndex);
+                }
+                if (!Boolean.FALSE.equals(effective)) {
+                    effective = null;
+                }
+            }
+
+            if (Boolean.FALSE.equals(trackParentExists[current])) {
+                break;
+            }
+            if (!Boolean.TRUE.equals(trackParentExists[current])
+                    || trackParentPositions[current] == null) {
+                relationshipUnobserved = true;
+                break;
+            }
+            Integer parentSlot = positionToSlot.get(trackParentPositions[current]);
+            if (parentSlot == null) {
+                relationshipUnobserved = true;
+                break;
+            }
+            current = parentSlot;
+        }
+
+        if (relationshipUnobserved && !Boolean.FALSE.equals(effective)) {
+            effective = null;
+        }
+        Collections.sort(unobserved);
+        return new ActivationFold(effective, List.copyOf(unobserved));
+    }
+
     private JsonObject getTracksState() {
+        CanonicalTrackSnapshot snapshot = getCanonicalTrackSnapshot();
         JsonObject obj = new JsonObject();
-        obj.addProperty("bankSize", TRACK_COUNT);
+        obj.addProperty("bankSize", snapshot.bankSize());
         obj.addProperty("scrollPosition", trackScrollPosition);
-        obj.addProperty("itemCount", trackItemCount);
+        if (snapshot.itemCountObserved()) {
+            obj.addProperty("itemCount", snapshot.itemCount());
+        } else {
+            obj.add("itemCount", JsonNull.INSTANCE);
+        }
+        obj.addProperty("itemCountObserved", snapshot.itemCountObserved());
+        obj.addProperty("complete", snapshot.complete());
+        obj.addProperty("returnedCount", snapshot.rows().size());
+        if (snapshot.lastReturnedTrackIndex() == null) {
+            obj.add("lastReturnedPath", JsonNull.INSTANCE);
+        } else {
+            JsonArray path = new JsonArray();
+            JsonObject segment = new JsonObject();
+            segment.addProperty("trackIndex", snapshot.lastReturnedTrackIndex());
+            path.add(segment);
+            obj.add("lastReturnedPath", path);
+        }
         obj.addProperty("canScrollBackwards", trackCanScrollBackwards);
         obj.addProperty("canScrollForwards", trackCanScrollForwards);
 
         JsonArray arr = new JsonArray();
-        for (int i = 0; i < TRACK_COUNT; i++) {
+        for (CanonicalTrackRow row : snapshot.rows()) {
+            int i = row.bankSlot();
             JsonObject track = new JsonObject();
-            track.addProperty("index", i);
-            track.addProperty("name", trackNames[i] != null ? trackNames[i] : "");
+            track.addProperty("index", row.trackIndex());
+            track.addProperty("trackIndex", row.trackIndex());
+            track.addProperty("uiNumber", row.trackIndex() + 1);
+            track.addProperty("name", row.name());
+            track.addProperty("type", row.type());
+            track.addProperty("trackType", row.type());
+            if (row.parentIndex() == null) {
+                track.add("parentIndex", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("parentIndex", row.parentIndex());
+            }
+            track.addProperty("depth", row.depth());
+            if (row.activated() == null) {
+                track.add("activated", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("activated", row.activated());
+            }
+            if (row.effectiveActivated() == null) {
+                track.add("effectiveActivated", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("effectiveActivated", row.effectiveActivated());
+            }
+            track.addProperty("trackIdentityRequired", row.identityRequired());
+            track.addProperty("identityRequired", row.identityRequired());
+            if (row.position() == null) {
+                track.add("position", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("position", row.position());
+            }
+            if (row.legacyName() == null) {
+                track.add("legacyName", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("legacyName", row.legacyName());
+            }
+            if (row.legacyPosition() == null) {
+                track.add("legacyPosition", JsonNull.INSTANCE);
+            } else {
+                track.addProperty("legacyPosition", row.legacyPosition());
+            }
+            JsonArray unobservedActivationIndices = new JsonArray();
+            for (Integer unobservedIndex : row.unobservedActivationIndices()) {
+                unobservedActivationIndices.add(unobservedIndex);
+            }
+            track.add("unobservedActivationIndices", unobservedActivationIndices);
+
             track.addProperty("volume", trackVolumes[i]);
             track.addProperty("pan", trackPans[i]);
             track.addProperty("mute", trackMutes[i]);
@@ -1544,7 +1901,6 @@ public class StateCache {
 
             track.addProperty("crossfadeMode", trackCrossfadeModes[i] != null ? trackCrossfadeModes[i] : "");
             track.addProperty("monitorMode", trackMonitorModes[i] != null ? trackMonitorModes[i] : "");
-            track.addProperty("trackType", trackTypes[i] != null ? trackTypes[i] : "");
             track.addProperty("isGroup", trackIsGroup[i]);
             track.addProperty("isGroupExpanded", trackIsGroupExpanded[i]);
             track.addProperty("canHoldNoteData", trackCanHoldNoteData[i]);
@@ -1588,7 +1944,6 @@ public class StateCache {
                 clips.add(clip);
             }
             track.add("clips", clips);
-
             arr.add(track);
         }
         obj.add("tracks", arr);
@@ -1768,18 +2123,18 @@ public class StateCache {
      */
     public JsonObject getArrangerClipState() {
         JsonObject obj = new JsonObject();
-        obj.addProperty("exists", arrangerClipExists);
-        obj.addProperty("trackName", arrangerClipTrackName);
+        // F1: unwritten arranger fields are absent, even when the dispatcher retains
+        // explicit JsonNull values for other RPC contracts.
+        if (arrangerClipExists != null) obj.addProperty("exists", arrangerClipExists);
+        if (arrangerClipTrackName != null) obj.addProperty("trackName", arrangerClipTrackName);
         obj.addProperty("playingStep", arrangerClipPlayingStep);
-        obj.addProperty("loopStart", arrangerClipLoopStart);
-        obj.addProperty("loopLength", arrangerClipLoopLength);
-        obj.addProperty("playStart", arrangerClipPlayStart);
-        obj.addProperty("playStop", arrangerClipPlayStop);
-        obj.addProperty("stepSize", arrangerClipStepSize);
+        if (arrangerClipLoopStart != null) obj.addProperty("loopStart", arrangerClipLoopStart);
+        if (arrangerClipLoopLength != null) obj.addProperty("loopLength", arrangerClipLoopLength);
+        if (arrangerClipPlayStart != null) obj.addProperty("playStart", arrangerClipPlayStart);
+        if (arrangerClipPlayStop != null) obj.addProperty("playStop", arrangerClipPlayStop);
+        if (arrangerClipStepSize != null) obj.addProperty("stepSize", arrangerClipStepSize);
         float[] rgb = arrangerClipColor;
-        if (rgb == null) {
-            obj.add("color", JsonNull.INSTANCE);
-        } else {
+        if (rgb != null) {
             JsonObject color = new JsonObject();
             color.addProperty("r", rgb[0]);
             color.addProperty("g", rgb[1]);
@@ -1788,13 +2143,17 @@ public class StateCache {
         }
         return obj;
     }
-
     private JsonObject getMasterState() {
         JsonObject obj = new JsonObject();
         obj.addProperty("volume", masterVolume);
         obj.addProperty("pan", masterPan);
         obj.addProperty("mute", masterMute);
         obj.addProperty("solo", masterSolo);
+        if (masterActivated == null) {
+            obj.add("activated", JsonNull.INSTANCE);
+        } else {
+            obj.addProperty("activated", masterActivated);
+        }
         JsonObject color = new JsonObject();
         color.addProperty("r", masterColor[0]);
         color.addProperty("g", masterColor[1]);

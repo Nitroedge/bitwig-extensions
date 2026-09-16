@@ -80,7 +80,10 @@ public class SecondoExtension extends ControllerExtension {
     public void init() {
         // Create Bitwig API objects
         Transport transport = host.createTransport();
-        TrackBank trackBank = host.createMainTrackBank(TRACK_COUNT, SEND_COUNT, SCENE_COUNT);
+        TrackBankManager trackBankManager = TrackBankManager.createCanonical(
+            host, SEND_COUNT, SCENE_COUNT
+        );
+        TrackBank trackBank = trackBankManager.getCanonicalFlatTrackBank();
         trackBank.setShouldShowClipLauncherFeedback(true);
         trackBank.sceneBank().setIndication(true);
         MasterTrack masterTrack = host.createMasterTrack(0);
@@ -148,6 +151,7 @@ public class SecondoExtension extends ControllerExtension {
         commandQueue = new CommandQueue();
         serverManager = new ServerManager();
         stateCache = new StateCache();
+        trackBankManager.registerObservers(stateCache);
 
         // Register all observers into StateCache
         stateCache.registerObservers(transport, trackBank, masterTrack, application, project);
@@ -203,12 +207,11 @@ public class SecondoExtension extends ControllerExtension {
         // Register handlers
         new ApplicationHandler(application, host, trackBank).register(dispatcher);
         new TransportHandler(transport, stateCache).register(dispatcher);
-        TrackBankManager trackBankManager = new TrackBankManager(trackBank, TRACK_COUNT);
         new TrackHandler(trackBank, application, cursorTrack, trackBankManager, stateCache, noteInput).register(dispatcher);
         new MasterHandler(masterTrack).register(dispatcher);
         new ClipHandler(trackBank, trackBank.sceneBank(), cursorClip, stateCache).register(dispatcher);
         DeviceLibrary deviceLibrary = resolveDeviceLibrary();
-        new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary, transport, host, host::scheduleTask).register(dispatcher);
+        new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary, transport, host, host::scheduleTask, trackBankManager).register(dispatcher);
         new NoteHandler(cursorClip, stateCache).register(dispatcher);
         new ArrangerClipHandler(arrangerClip, stateCache).register(dispatcher);
         new SceneHandler(trackBank.sceneBank(), project, stateCache).register(dispatcher);

@@ -150,8 +150,8 @@ class TrackHandlerTest {
     }
 
     @Test
-    void registersExactlyThirtyFourMethods() {
-        assertEquals(34, dispatcher.getRegisteredMethods().size());
+    void registersExactlyThirtyFiveMethods() {
+        assertEquals(35, dispatcher.getRegisteredMethods().size());
     }
 
     // --- trackBank/scrollTo validation ---
@@ -518,6 +518,115 @@ class TrackHandlerTest {
         verify(mockSoloValue).toggle(false);
     }
 
+    @Test
+    void setActivatedTouchesOnlyAddressedTrackAndObservesOwnValue() {
+        StateCache cache = mock(StateCache.class);
+        Track group = mock(Track.class);
+        Track child = mock(Track.class);
+        SettableBooleanValue own = mock(SettableBooleanValue.class);
+        when(mockTrackBankManager.getCanonicalTrack(0)).thenReturn(group);
+        when(group.isActivated()).thenReturn(own);
+        StateCache.CanonicalTrackSnapshot before = activationSnapshot(true, true);
+        StateCache.CanonicalTrackSnapshot after = activationSnapshot(false, true);
+        when(cache.getCanonicalTrackSnapshot()).thenReturn(before, after);
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack,
+            mockTrackBankManager, cache, mockNoteInput).register(local);
+        String response = local.handle(rpc(
+            "track/setActivated", "{\"index\":0,\"activated\":false}"
+        ));
+
+        verify(own, times(1)).set(false);
+        verify(mockTrackBankManager, never()).getCanonicalTrack(1);
+        verify(child, never()).isActivated();
+        assertContains(response, "\"trackIndex\":0");
+        assertContains(response, "\"dispatched\":true");
+        assertContains(response, "\"observed\":true");
+        assertContains(response, "\"activated\":false");
+        assertEquals(Boolean.TRUE, after.rows().get(1).activated());
+        assertEquals(Boolean.FALSE, after.rows().get(1).effectiveActivated());
+    }
+
+    @Test
+    void setActivatedNoopDoesNotDispatch() {
+        StateCache cache = mock(StateCache.class);
+        Track group = mock(Track.class);
+        when(mockTrackBankManager.getCanonicalTrack(0)).thenReturn(group);
+        when(cache.getCanonicalTrackSnapshot()).thenReturn(activationSnapshot(false, true));
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack,
+            mockTrackBankManager, cache, mockNoteInput).register(local);
+
+        String response = local.handle(rpc(
+            "track/setActivated", "{\"index\":0,\"activated\":false}"
+        ));
+
+        verify(group, never()).isActivated();
+        assertContains(response, "\"dispatched\":false");
+        assertContains(response, "\"observed\":true");
+    }
+
+    @Test
+    void setActivatedOppositeReadbackDoesNotInventConfirmation() {
+        StateCache cache = mock(StateCache.class);
+        Track group = mock(Track.class);
+        SettableBooleanValue own = mock(SettableBooleanValue.class);
+        when(mockTrackBankManager.getCanonicalTrack(0)).thenReturn(group);
+        when(group.isActivated()).thenReturn(own);
+        when(cache.getCanonicalTrackSnapshot()).thenReturn(activationSnapshot(true, true));
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack,
+            mockTrackBankManager, cache, mockNoteInput).register(local);
+
+        String response = local.handle(rpc(
+            "track/setActivated", "{\"index\":0,\"activated\":false}"
+        ));
+
+        verify(own, times(1)).set(false);
+        assertContains(response, "\"dispatched\":true");
+        assertContains(response, "\"observed\":true");
+        assertContains(response, "\"activated\":true");
+    }
+
+    @Test
+    void setActivatedColdReadbackRemainsUnobservedAfterSingleDispatch() {
+        StateCache cache = mock(StateCache.class);
+        Track group = mock(Track.class);
+        SettableBooleanValue own = mock(SettableBooleanValue.class);
+        when(mockTrackBankManager.getCanonicalTrack(0)).thenReturn(group);
+        when(group.isActivated()).thenReturn(own);
+        when(cache.getCanonicalTrackSnapshot()).thenReturn(activationSnapshot(null, true));
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack,
+            mockTrackBankManager, cache, mockNoteInput).register(local);
+
+        String response = local.handle(rpc(
+            "track/setActivated", "{\"index\":0,\"activated\":false}"
+        ));
+
+        verify(own, times(1)).set(false);
+        assertContains(response, "\"dispatched\":true");
+        assertContains(response, "\"observed\":false");
+        assertContains(response, "\"activated\":null");
+    }
+
+    private StateCache.CanonicalTrackSnapshot activationSnapshot(
+            Boolean groupActivated, Boolean childActivated) {
+        StateCache.CanonicalTrackRow group = new StateCache.CanonicalTrackRow(
+            0, 0, "Band", "Group", null, 0, groupActivated, groupActivated,
+            false, "Band", 0, 0, java.util.List.of()
+        );
+        Boolean childEffective = groupActivated == null ? null
+            : Boolean.FALSE.equals(groupActivated) ? Boolean.FALSE : childActivated;
+        StateCache.CanonicalTrackRow child = new StateCache.CanonicalTrackRow(
+            1, 1, "Kick", "Instrument", 0, 1, childActivated, childEffective,
+            false, "Kick", 1, 1, java.util.List.of()
+        );
+        return new StateCache.CanonicalTrackSnapshot(
+            java.util.List.of(group, child), true, 2, 16, true, 1
+        );
+    }
     // --- Helpers ---
 
     private String rpc(String method, String params) {

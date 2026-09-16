@@ -5,6 +5,8 @@ import com.google.gson.JsonObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static dev.bcrick.secondo.extension.StateCacheTestHelper.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -332,4 +334,68 @@ class StateCacheSnapshotTest {
         assertEquals(64, nl.get("velocityThreshold").getAsInt());
         assertEquals(3, nl.get("activeNotes").getAsInt());
     }
+
+    @Test
+    void recursiveSubtreeAndEffectiveActivationAreThreeValued() {
+        observeTrack(0, "Band", "Group", 0, false, null, true);
+        observeTrack(1, "Drums", "Instrument", 1, true, 0, false);
+        observeTrack(2, "Return", "Effect", 10, false, null, true);
+        observeTrack(3, "Kick", "Instrument", 2, true, 1, null);
+        observeTrack(4, "Bass", "Instrument", 3, true, 0, null);
+        observeTrack(5, "Master", "Master", 99, false, null, true);
+        for (int i = 6; i < trackCountOf(StateCache.class); i++) {
+            setArrayElement(cache, "trackExists", i, false);
+        }
+        setField(cache, "trackItemCount", 6);
+        setField(cache, "trackItemCountObserved", true);
+        setField(cache, "masterActivated", false);
+
+        StateCache.CanonicalTrackSnapshot all = cache.getCanonicalTrackSnapshot();
+        assertEquals(5, all.rows().size(), "master must stay outside the indexed rows");
+        assertTrue(all.complete());
+        assertEquals(6, all.itemCount());
+
+        StateCache.CanonicalTrackRow child = all.rows().get(1);
+        assertEquals(0, child.parentIndex());
+        assertEquals(1, child.depth());
+        assertFalse(child.effectiveActivated());
+
+        StateCache.CanonicalTrackRow grandchild = all.rows().get(3);
+        assertEquals(1, grandchild.parentIndex());
+        assertEquals(2, grandchild.depth());
+        assertNull(grandchild.activated());
+        assertFalse(grandchild.effectiveActivated(),
+            "an observed false ancestor wins over a cold own value");
+
+        StateCache.CanonicalTrackRow coldChild = all.rows().get(4);
+        assertNull(coldChild.activated());
+        assertNull(coldChild.effectiveActivated());
+        assertEquals(List.of(4), coldChild.unobservedActivationIndices());
+
+        StateCache.CanonicalTrackSnapshot subtree = cache.getCanonicalTrackSubtree(0);
+        assertEquals(List.of(0, 1, 3, 4),
+            subtree.rows().stream().map(StateCache.CanonicalTrackRow::trackIndex).toList());
+        assertFalse(subtree.rows().stream().anyMatch(row -> "Return".equals(row.name())));
+
+        JsonObject master = cache.getSnapshot().getAsJsonObject("master");
+        assertFalse(master.get("activated").getAsBoolean());
+    }
+
+    private void observeTrack(
+            int slot,
+            String name,
+            String type,
+            int position,
+            boolean parentExists,
+            Integer parentPosition,
+            Boolean activated) {
+        setArrayElement(cache, "trackExists", slot, true);
+        setArrayElement(cache, "trackNames", slot, name);
+        setArrayElement(cache, "trackTypes", slot, type);
+        setArrayElement(cache, "trackPositions", slot, position);
+        setArrayElement(cache, "trackParentExists", slot, parentExists);
+        setArrayElement(cache, "trackParentPositions", slot, parentPosition);
+        setArrayElement(cache, "trackActivations", slot, activated);
+    }
+
 }

@@ -7,7 +7,7 @@ import java.util.*;
 public class JsonRpcDispatcher {
 
     private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
-    private final Gson gson = new Gson();
+    private final Gson gson = new GsonBuilder().serializeNulls().create();
 
     public void register(String method, MethodHandler handler) {
         handlers.put(method, handler);

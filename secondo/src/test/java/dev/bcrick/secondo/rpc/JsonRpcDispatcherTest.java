@@ -40,6 +40,25 @@ class JsonRpcDispatcherTest {
     }
 
     @Test
+    void preservesExplicitNullMembersInSingleAndBatchResponses() {
+        dispatcher.register("cold", params -> {
+            JsonObject result = new JsonObject();
+            result.add("activated", JsonNull.INSTANCE);
+            result.addProperty("observed", false);
+            return result;
+        });
+        String request = "{\"jsonrpc\":\"2.0\",\"method\":\"cold\",\"id\":1}";
+        JsonObject single = JsonParser.parseString(dispatcher.handle(request))
+            .getAsJsonObject().getAsJsonObject("result");
+        assertTrue(single.has("activated"));
+        assertTrue(single.get("activated").isJsonNull());
+        JsonObject batch = JsonParser.parseString(dispatcher.handle("[" + request + "]"))
+            .getAsJsonArray().get(0).getAsJsonObject().getAsJsonObject("result");
+        assertTrue(batch.has("activated"));
+        assertTrue(batch.get("activated").isJsonNull());
+    }
+
+    @Test
     void returnsMethodNotFound() {
         String request = """
             {"jsonrpc":"2.0","method":"unknown","id":1}""";

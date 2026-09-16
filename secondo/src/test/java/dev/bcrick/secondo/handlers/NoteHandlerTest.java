@@ -179,8 +179,51 @@ class NoteHandlerTest {
     void setNotes_callsCursorClipSetStep() {
         dispatcher.handle(rpc("clip/setNotes",
             "{\"notes\":[{\"x\":0,\"y\":60,\"velocity\":0.8,\"duration\":0.5}]}"));
-        // velocity 0.8 * 127 = 101 (int cast)
-        verify(mockCursorClip).setStep(0, 0, 60, 101, 0.5);
+        // velocity 0.8 * 127 = 101.6, which rounds to bucket 102
+        verify(mockCursorClip).setStep(0, 0, 60, 102, 0.5);
+    }
+
+    @Test
+    void normalizedVelocityRoundTripsAll128Buckets() {
+        for (int velocity = 0; velocity <= 127; velocity++) {
+            double normalized = (double) (float) (velocity / 127.0);
+            assertEquals(
+                velocity,
+                NoteHandler.normalizedVelocityToMidi(normalized),
+                "float32-normalized bucket " + velocity + " must round-trip"
+            );
+        }
+    }
+
+    @Test
+    void normalizedVelocityRoundsAtBucketBoundariesAndClamps() {
+        int[] representativeBuckets = {0, 1, 63, 64, 126};
+        for (int lowerBucket : representativeBuckets) {
+            double boundary = (lowerBucket + 0.5) / 127.0;
+            assertEquals(
+                lowerBucket,
+                NoteHandler.normalizedVelocityToMidi(Math.nextDown(boundary)),
+                "value below boundary must stay in bucket " + lowerBucket
+            );
+            assertEquals(
+                lowerBucket + 1,
+                NoteHandler.normalizedVelocityToMidi(boundary),
+                "boundary must round into bucket " + (lowerBucket + 1)
+            );
+            assertEquals(
+                lowerBucket + 1,
+                NoteHandler.normalizedVelocityToMidi(Math.nextUp(boundary)),
+                "value above boundary must enter bucket " + (lowerBucket + 1)
+            );
+        }
+
+        assertEquals(0, NoteHandler.normalizedVelocityToMidi(-Double.MIN_VALUE));
+        assertEquals(0, NoteHandler.normalizedVelocityToMidi(0.0));
+        assertEquals(1, NoteHandler.normalizedVelocityToMidi(1.0 / 127.0));
+        assertEquals(64, NoteHandler.normalizedVelocityToMidi(64.0 / 127.0));
+        assertEquals(126, NoteHandler.normalizedVelocityToMidi(126.0 / 127.0));
+        assertEquals(127, NoteHandler.normalizedVelocityToMidi(1.0));
+        assertEquals(127, NoteHandler.normalizedVelocityToMidi(Math.nextUp(1.0)));
     }
 
     @Test
