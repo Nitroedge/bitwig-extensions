@@ -7,10 +7,6 @@ import com.bitwig.extension.controller.api.CursorTrack;
 import com.bitwig.extension.controller.api.BooleanValue;
 import com.bitwig.extension.controller.api.Device;
 import com.bitwig.extension.controller.api.DeviceBank;
-import com.bitwig.extension.controller.api.DeviceChain;
-import com.bitwig.extension.controller.api.DeviceLayer;
-import com.bitwig.extension.controller.api.DeviceLayerBank;
-import com.bitwig.extension.controller.api.DrumPad;
 import com.bitwig.extension.controller.api.IntegerValue;
 import com.bitwig.extension.controller.api.StringArrayValue;
 import com.bitwig.extension.controller.api.StringValue;
@@ -30,8 +26,6 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.List;
 import java.util.Set;
 
@@ -54,7 +48,7 @@ public class DeviceHandler {
     private final ControllerHost host;
     private final TaskScheduler scheduler;
     private final TrackBankManager trackBankManager;
-    private final DeviceBank[] canonicalDeviceBanks;
+    private final PreparedChainBank[] canonicalDeviceBanks;
     private volatile boolean chainScanInProgress = false;
     private volatile JsonObject chainScanResult = null;
     private volatile int chainScanId = 0;
@@ -96,8 +90,7 @@ public class DeviceHandler {
         this.host = host;
         this.scheduler = scheduler;
         this.trackBankManager = trackBankManager;
-        this.canonicalDeviceBanks = canonicalDeviceBanks == null
-            ? null : canonicalDeviceBanks.clone();
+        this.canonicalDeviceBanks = prepareCanonicalDeviceBanks(canonicalDeviceBanks);
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -112,10 +105,14 @@ public class DeviceHandler {
                 if (chainScanInProgress) {
                     throw new IllegalStateException("DEVICE_CHAIN_SCAN_IN_PROGRESS");
                 }
-                DeviceChain root = trackBankManager.getCanonicalTrack(trackIndex);
-                DeviceBank rootBank = canonicalDeviceBanks == null ? null
-                    : canonicalDeviceBanks[trackBankManager.canonicalBankSlot(trackIndex)];
-                ChainScanJob job = new ChainScanJob(root, rootBank, ++chainScanId);
+                int bankSlot = trackBankManager.canonicalBankSlot(trackIndex);
+                PreparedChainBank rootBank = canonicalDeviceBanks == null ? null
+                    : canonicalDeviceBanks[bankSlot];
+                if (rootBank == null) {
+                    throw new IllegalStateException(
+                        "Canonical device bank is unavailable for track " + trackIndex);
+                }
+                ChainScanJob job = new ChainScanJob(rootBank, ++chainScanId);
                 chainScanResult = null;
                 chainScanInProgress = true;
                 try {
@@ -721,58 +718,69 @@ public class DeviceHandler {
         return observed;
     }
 
+    private static final class PreparedDevice {
+        final Observed<Boolean> exists;
+        final Observed<String> name;
+        final Observed<Boolean> plugin;
+        final Observed<Boolean> enabled;
+        final Observed<String[]> slots;
+        final Observed<Boolean> layers;
+        final Observed<Boolean> pads;
+
+        PreparedDevice(Device device) {
+            exists = observe(device.exists());
+            name = observe(device.name());
+            plugin = observe(device.isPlugin());
+            enabled = observe(device.isEnabled());
+            slots = observe(device.slotNames());
+            layers = observe(device.hasLayers());
+            pads = observe(device.hasDrumPads());
+        }
+    }
+
+    private static final class PreparedChainBank {
+        final Observed<Integer> total;
+        final PreparedDevice[] devices;
+
+        PreparedChainBank(DeviceBank bank) {
+            total = observe(bank.itemCount());
+            int width = Math.min(CHAIN_ROOT_BANK_WIDTH, bank.getSizeOfBank());
+            devices = new PreparedDevice[width];
+            for (int position = 0; position < width; position++) {
+                devices[position] = new PreparedDevice(bank.getItemAt(position));
+            }
+        }
+    }
+
+    private static PreparedChainBank[] prepareCanonicalDeviceBanks(DeviceBank[] banks) {
+        if (banks == null) return null;
+        PreparedChainBank[] prepared = new PreparedChainBank[banks.length];
+        for (int index = 0; index < banks.length; index++) {
+            if (banks[index] != null) prepared[index] = new PreparedChainBank(banks[index]);
+        }
+        return prepared;
+    }
+
     private final class ChainScanJob {
+        private final PreparedChainBank root;
         private final int scanId;
-        private final Deque<Step> pending = new ArrayDeque<>();
         private final JsonArray nodes = new JsonArray();
         private final JsonArray warnings = new JsonArray();
-        private final int[] counts = new int[3];
         private JsonArray lastReturnedPath;
-        private Integer topLevelDeviceCount;
-        private int topLevelReturnedCount;
         private boolean complete = true;
         private boolean finished;
 
-        private abstract class Step {
-            abstract void visit();
-        }
-
-        ChainScanJob(DeviceChain root, DeviceBank rootBank, int scanId) {
+        ChainScanJob(PreparedChainBank root, int scanId) {
+            this.root = root;
             this.scanId = scanId;
-            queueDevices(root, rootBank, new JsonArray(), true);
         }
 
-        private int remainingBankWidth() {
-            return Math.max(1, Math.min(CHAIN_NODE_BUDGET + 1,
-                CHAIN_NODE_BUDGET - nodes.size() + 1));
-        }
-
-        private JsonArray append(JsonArray parent, JsonObject segment) {
-            JsonArray path = parent.deepCopy();
-            path.add(segment);
-            return path;
-        }
-
-        private JsonObject deviceSegment(int position) {
+        private JsonArray devicePath(int position) {
             JsonObject segment = new JsonObject();
             segment.addProperty("devicePosition", position);
-            return segment;
-        }
-
-        private JsonObject layerSegment(int index, String name) {
-            JsonObject segment = new JsonObject();
-            segment.addProperty("layerIndex", index);
-            if (name == null) segment.add("layerName", com.google.gson.JsonNull.INSTANCE);
-            else segment.addProperty("layerName", name);
-            return segment;
-        }
-
-        private JsonObject padSegment(int note, String name) {
-            JsonObject segment = new JsonObject();
-            segment.addProperty("note", note);
-            if (name == null) segment.add("name", com.google.gson.JsonNull.INSTANCE);
-            else segment.addProperty("name", name);
-            return segment;
+            JsonArray path = new JsonArray();
+            path.add(segment);
+            return path;
         }
 
         private void warning(String code, String message) {
@@ -781,167 +789,6 @@ public class DeviceHandler {
             warning.addProperty("message", message);
             warnings.add(warning);
             complete = false;
-        }
-
-        private void emit(JsonObject row, JsonArray path, int kind) {
-            nodes.add(row);
-            counts[kind]++;
-            lastReturnedPath = path.deepCopy();
-        }
-
-        private boolean atBudget(JsonArray nextPath) {
-            if (nodes.size() < CHAIN_NODE_BUDGET) return false;
-            warning("DEVICE_CHAIN_TRUNCATED",
-                "Stopped after path " + lastReturnedPath
-                    + "; next reachable branch begins at " + nextPath);
-            finish();
-            return true;
-        }
-
-        private void queueDevices(DeviceChain chain, JsonArray parent, boolean topLevel) {
-            queueDevices(chain, null, parent, topLevel);
-        }
-
-        private void queueDevices(DeviceChain chain, DeviceBank bank,
-                                  JsonArray parent, boolean topLevel) {
-            pending.addFirst(new ExpandDevices(chain, bank, parent, topLevel));
-        }
-
-        private void queueLayers(Device device, JsonArray parent) {
-            pending.addFirst(new ExpandLayers(device, parent));
-        }
-
-        private void queuePads(Device device, JsonArray parent) {
-            pending.addFirst(new ExpandPads(device, parent));
-        }
-
-        private final class ExpandDevices extends Step {
-            private final JsonArray parent;
-            private final boolean topLevel;
-            private final DeviceWork[] work;
-            private final Observed<Integer> total;
-
-            ExpandDevices(DeviceChain chain, DeviceBank preparedBank,
-                          JsonArray parent, boolean topLevel) {
-                this.parent = parent.deepCopy();
-                this.topLevel = topLevel;
-                DeviceBank bank = preparedBank == null
-                    ? chain.createDeviceBank(remainingBankWidth()) : preparedBank;
-                int width = Math.min(remainingBankWidth(), bank.getSizeOfBank());
-                total = observe(bank.itemCount());
-                work = new DeviceWork[width];
-                for (int i = 0; i < width; i++) {
-                    work[i] = new DeviceWork(bank.getItemAt(i), i, this.parent, topLevel);
-                }
-            }
-
-            @Override public void visit() {
-                if (topLevel) topLevelDeviceCount = total.value;
-                if (total.value == null && !topLevel) {
-                    warning("DEVICE_CHAIN_COUNT_UNOBSERVED",
-                        "Nested device count unobserved at " + parent
-                            + "; only the visible bank window was scanned.");
-                }
-                int visible = total.value == null ? work.length
-                    : Math.min(Math.max(0, total.value), work.length);
-                if (total.value != null && total.value > work.length) {
-                    pending.addFirst(new Suffix(append(parent,
-                        deviceSegment(work.length)), "device bank"));
-                }
-                for (int i = visible - 1; i >= 0; i--) pending.addFirst(work[i]);
-            }
-        }
-
-        private final class DeviceWork extends Step {
-            private final Device device;
-            private final int position;
-            private final JsonArray parent;
-            private final boolean topLevel;
-            private final Observed<Boolean> exists;
-
-            DeviceWork(Device device, int position, JsonArray parent, boolean topLevel) {
-                this.device = device;
-                this.position = position;
-                this.parent = parent;
-                this.topLevel = topLevel;
-                exists = observe(device.exists());
-            }
-
-            @Override public void visit() {
-                JsonArray path = append(parent, deviceSegment(position));
-                if (exists.value == null) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Device existence unobserved at " + path);
-                    return;
-                }
-                if (!exists.value || atBudget(path)) return;
-                pending.addFirst(new ReadDevice(device, position, parent, topLevel));
-            }
-        }
-
-        private final class ReadDevice extends Step {
-            private final Device device;
-            private final int position;
-            private final JsonArray parent;
-            private final boolean topLevel;
-            private final Observed<String> name;
-            private final Observed<Boolean> plugin;
-            private final Observed<Boolean> enabled;
-            private final Observed<String[]> slots;
-            private final Observed<Boolean> layers;
-            private final Observed<Boolean> pads;
-
-            ReadDevice(Device device, int position, JsonArray parent, boolean topLevel) {
-                this.device = device;
-                this.position = position;
-                this.parent = parent;
-                this.topLevel = topLevel;
-                name = observe(device.name());
-                plugin = observe(device.isPlugin());
-                enabled = observe(device.isEnabled());
-                slots = observe(device.slotNames());
-                layers = observe(device.hasLayers());
-                pads = observe(device.hasDrumPads());
-            }
-
-            @Override public void visit() {
-                JsonArray path = append(parent, deviceSegment(position));
-                if (atBudget(path)) return;
-                JsonObject row = new JsonObject();
-                row.addProperty("kind", "device");
-                row.add("path", path.deepCopy());
-                row.add("parentPath", topLevel
-                    ? com.google.gson.JsonNull.INSTANCE : parent.deepCopy());
-                row.addProperty("depth", path.size() - 1);
-                row.addProperty("devicePosition", position);
-                List<String> cold = new ArrayList<>();
-                addString(row, "name", name.value, cold);
-                addBoolean(row, "isPlugin", plugin.value, cold);
-                addBoolean(row, "isEnabled", enabled.value, cold);
-                JsonArray slotNames = new JsonArray();
-                if (slots.value == null) {
-                    row.add("slotNames", com.google.gson.JsonNull.INSTANCE);
-                    cold.add("slotNames");
-                } else {
-                    for (String slot : slots.value) slotNames.add(slot);
-                    row.add("slotNames", slotNames);
-                    if (slots.value.length > 0) {
-                        warning("DEVICE_SLOT_CONTENTS_UNAVAILABLE",
-                            "Named FX slots at " + path + " are opaque: " + slotNames);
-                    }
-                }
-                addBoolean(row, "hasLayers", layers.value, cold);
-                addBoolean(row, "hasDrumPads", pads.value, cold);
-                if (!cold.isEmpty()) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Device fields unobserved at " + path + ": " + cold);
-                }
-                emit(row, path, 0);
-                if (topLevel) topLevelReturnedCount++;
-                // Stack is LIFO: queue pad first so indexed layers visit first.
-                if (Boolean.TRUE.equals(pads.value)) queuePads(device, path);
-                if (Boolean.TRUE.equals(layers.value)) queueLayers(device, path);
-            }
         }
 
         private void addString(JsonObject row, String key, String value,
@@ -960,183 +807,85 @@ public class DeviceHandler {
             } else row.addProperty(key, value);
         }
 
-        private final class ExpandLayers extends Step {
-            private final JsonArray parent;
-            private final LayerWork[] work;
-            private final Observed<Integer> total;
-
-            ExpandLayers(Device device, JsonArray parent) {
-                this.parent = parent.deepCopy();
-                DeviceLayerBank bank = device.createLayerBank(remainingBankWidth());
-                int width = Math.min(remainingBankWidth(), bank.getSizeOfBank());
-                total = observe(bank.itemCount());
-                work = new LayerWork[width];
-                for (int i = 0; i < width; i++) {
-                    work[i] = new LayerWork(bank.getItemAt(i), i, this.parent);
-                }
+        private void readDevice(PreparedDevice device, int position) {
+            JsonArray path = devicePath(position);
+            if (device.exists.value == null) {
+                warning("DEVICE_FIELD_UNOBSERVED",
+                    "Device existence unobserved at " + path);
+                return;
             }
-
-            @Override public void visit() {
-                if (total.value == null) {
-                    warning("DEVICE_CHAIN_COUNT_UNOBSERVED",
-                        "Layer count unobserved at " + parent
-                            + "; only the visible bank window was scanned.");
-                }
-                int visible = total.value == null ? work.length
-                    : Math.min(Math.max(0, total.value), work.length);
-                if (total.value != null && total.value > work.length) {
-                    pending.addFirst(new Suffix(append(parent,
-                        layerSegment(work.length, null)), "layer bank"));
-                }
-                for (int i = visible - 1; i >= 0; i--) pending.addFirst(work[i]);
-            }
-        }
-
-        private final class LayerWork extends Step {
-            private final DeviceLayer layer;
-            private final int index;
-            private final JsonArray parent;
-            private final Observed<Boolean> exists;
-            private final Observed<String> name;
-
-            LayerWork(DeviceLayer layer, int index, JsonArray parent) {
-                this.layer = layer;
-                this.index = index;
-                this.parent = parent;
-                exists = observe(layer.exists());
-                name = observe(layer.name());
-            }
-
-            @Override public void visit() {
-                JsonArray path = append(parent, layerSegment(index, name.value));
-                if (exists.value == null) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Layer existence unobserved at " + path);
-                    return;
-                }
-                if (!exists.value || atBudget(path)) return;
-                JsonObject row = new JsonObject();
-                row.addProperty("kind", "layer");
-                row.add("path", path.deepCopy());
-                row.add("parentPath", parent.deepCopy());
-                row.addProperty("depth", path.size() - 1);
-                row.addProperty("layerIndex", index);
-                addString(row, "layerName", name.value, new ArrayList<>());
-                if (name.value == null) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Layer name unobserved at " + path);
-                }
-                emit(row, path, 1);
-                queueDevices(layer, path, false);
-            }
-        }
-
-        private final class ExpandPads extends Step {
-            private final PadWork[] work;
-
-            ExpandPads(Device device, JsonArray parent) {
-                DrumPadBank bank = device.createDrumPadBank(128);
-                work = new PadWork[128];
-                for (int note = 0; note < 128; note++) {
-                    work[note] = new PadWork(bank.getItemAt(note), note, parent);
-                }
-            }
-
-            @Override public void visit() {
-                // The full MIDI bank maps slot index to note and includes empty pads.
-                for (int note = 127; note >= 0; note--) pending.addFirst(work[note]);
-            }
-        }
-
-        private final class PadWork extends Step {
-            private final DrumPad pad;
-            private final int note;
-            private final JsonArray parent;
-            private final Observed<Boolean> exists;
-
-            PadWork(DrumPad pad, int note, JsonArray parent) {
-                this.pad = pad;
-                this.note = note;
-                this.parent = parent.deepCopy();
-                exists = observe(pad.exists());
-            }
-
-            @Override public void visit() {
-                JsonArray path = append(parent, padSegment(note, null));
-                if (exists.value == null) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Pad existence unobserved at " + path);
-                    return;
-                }
-                if (exists.value) pending.addFirst(new ReadPad(pad, note, parent));
-            }
-        }
-
-        private final class ReadPad extends Step {
-            private final DrumPad pad;
-            private final int note;
-            private final JsonArray parent;
-            private final Observed<String> name;
-
-            ReadPad(DrumPad pad, int note, JsonArray parent) {
-                this.pad = pad;
-                this.note = note;
-                this.parent = parent.deepCopy();
-                name = observe(pad.name());
-            }
-
-            @Override public void visit() {
-                JsonArray path = append(parent, padSegment(note, name.value));
-                if (atBudget(path)) return;
-                JsonObject row = new JsonObject();
-                row.addProperty("kind", "pad");
-                row.add("path", path.deepCopy());
-                row.add("parentPath", parent.deepCopy());
-                row.addProperty("depth", path.size() - 1);
-                row.addProperty("note", note);
-                addString(row, "name", name.value, new ArrayList<>());
-                if (name.value == null) {
-                    warning("DEVICE_FIELD_UNOBSERVED",
-                        "Pad name unobserved at " + path);
-                }
-                emit(row, path, 2);
-                queueDevices(pad, path, false);
-            }
-        }
-
-        private final class Suffix extends Step {
-            private final JsonArray next;
-            private final String bank;
-            Suffix(JsonArray next, String bank) {
-                this.next = next;
-                this.bank = bank;
-            }
-            @Override public void visit() {
+            if (!device.exists.value) return;
+            if (nodes.size() >= CHAIN_NODE_BUDGET) {
                 warning("DEVICE_CHAIN_TRUNCATED",
-                    "More reachable " + bank + " items begin at " + next
+                    "More top-level devices begin at " + path
                         + " after last returned path " + lastReturnedPath);
-                finish();
+                return;
             }
+
+            JsonObject row = new JsonObject();
+            row.addProperty("kind", "device");
+            row.add("path", path.deepCopy());
+            row.add("parentPath", com.google.gson.JsonNull.INSTANCE);
+            row.addProperty("depth", 0);
+            row.addProperty("devicePosition", position);
+            List<String> cold = new ArrayList<>();
+            addString(row, "name", device.name.value, cold);
+            addBoolean(row, "isPlugin", device.plugin.value, cold);
+            addBoolean(row, "isEnabled", device.enabled.value, cold);
+            JsonArray slotNames = new JsonArray();
+            if (device.slots.value == null) {
+                row.add("slotNames", com.google.gson.JsonNull.INSTANCE);
+                cold.add("slotNames");
+            } else {
+                for (String slot : device.slots.value) slotNames.add(slot);
+                row.add("slotNames", slotNames);
+                if (device.slots.value.length > 0) {
+                    warning("DEVICE_SLOT_CONTENTS_UNAVAILABLE",
+                        "Named FX slots at " + path + " are opaque: " + slotNames);
+                }
+            }
+            addBoolean(row, "hasLayers", device.layers.value, cold);
+            addBoolean(row, "hasDrumPads", device.pads.value, cold);
+            if (!cold.isEmpty()) {
+                warning("DEVICE_FIELD_UNOBSERVED",
+                    "Device fields unobserved at " + path + ": " + cold);
+            }
+            List<String> nested = new ArrayList<>();
+            if (Boolean.TRUE.equals(device.layers.value)) nested.add("layers");
+            if (Boolean.TRUE.equals(device.pads.value)) nested.add("drum pads");
+            if (!nested.isEmpty()) {
+                warning("DEVICE_NESTED_CONTENTS_UNAVAILABLE",
+                    "Nested " + String.join(" and ", nested) + " at " + path
+                        + " are unavailable to a cursor-independent Controller API v25 read.");
+            }
+            nodes.add(row);
+            lastReturnedPath = path.deepCopy();
         }
 
         void advance() {
             if (finished) return;
             try {
-                // Skip already-observed empty bank slots in this controller turn.
-                // Yield after a real node or after a device starts field observation.
-                while (!pending.isEmpty() && !finished) {
-                    int before = nodes.size();
-                    Step step = pending.removeFirst();
-                    step.visit();
-                    if (nodes.size() != before || finished) break;
-                    if (step instanceof DeviceWork
-                        && pending.peekFirst() instanceof ReadDevice) break;
-                    if (step instanceof PadWork
-                        && pending.peekFirst() instanceof ReadPad) break;
+                int visible = root.total.value == null ? root.devices.length
+                    : Math.min(Math.max(0, root.total.value), root.devices.length);
+                for (int position = 0; position < visible; position++) {
+                    readDevice(root.devices[position], position);
+                    if (nodes.size() >= CHAIN_NODE_BUDGET
+                        && (position + 1 < visible
+                            || (root.total.value != null
+                                && root.total.value > root.devices.length))) {
+                        if (warnings.size() == 0
+                            || !"DEVICE_CHAIN_TRUNCATED".equals(
+                                warnings.get(warnings.size() - 1).getAsJsonObject()
+                                    .get("code").getAsString())) {
+                            JsonArray next = devicePath(position + 1);
+                            warning("DEVICE_CHAIN_TRUNCATED",
+                                "More top-level devices begin at " + next
+                                    + " after last returned path " + lastReturnedPath);
+                        }
+                        break;
+                    }
                 }
-                if (finished) return;
-                if (pending.isEmpty()) finish();
-                else scheduler.schedule(this::advance, FLUSH_DELAY_MS);
+                finish();
             } catch (RuntimeException error) {
                 warning("DEVICE_CHAIN_SCAN_FAILED",
                     "Scheduled chain scan stopped: " + error.getMessage());
@@ -1147,6 +896,7 @@ public class DeviceHandler {
         private void finish() {
             if (finished) return;
             finished = true;
+            Integer topLevelDeviceCount = root.total.value;
             if (topLevelDeviceCount == null) {
                 warning("DEVICE_TOP_LEVEL_COUNT_UNOBSERVED",
                     "Canonical top-level DeviceBank.itemCount was not observed.");
@@ -1157,15 +907,15 @@ public class DeviceHandler {
             result.addProperty("bankSize", CHAIN_NODE_BUDGET);
             result.add("nodes", nodes);
             result.addProperty("returnedCount", nodes.size());
-            JsonObject returnedNodeCounts = new JsonObject();
-            returnedNodeCounts.addProperty("devices", counts[0]);
-            returnedNodeCounts.addProperty("layers", counts[1]);
-            returnedNodeCounts.addProperty("pads", counts[2]);
-            result.add("returnedNodeCounts", returnedNodeCounts);
+            JsonObject counts = new JsonObject();
+            counts.addProperty("devices", nodes.size());
+            counts.addProperty("layers", 0);
+            counts.addProperty("pads", 0);
+            result.add("returnedNodeCounts", counts);
             if (topLevelDeviceCount == null) {
                 result.add("topLevelDeviceCount", com.google.gson.JsonNull.INSTANCE);
             } else result.addProperty("topLevelDeviceCount", topLevelDeviceCount);
-            result.addProperty("topLevelReturnedCount", topLevelReturnedCount);
+            result.addProperty("topLevelReturnedCount", nodes.size());
             result.add("lastReturnedPath", lastReturnedPath == null
                 ? com.google.gson.JsonNull.INSTANCE : lastReturnedPath.deepCopy());
             result.add("warnings", warnings);

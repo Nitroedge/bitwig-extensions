@@ -642,18 +642,18 @@ class DeviceHandlerTest {
     }
 
     @Test
-    void listChainUsesInitTimeFlatSlotBankWithoutRuntimeFactory() {
+    void listChainUsesOnlyInitTimeObserversAndTopLevelBank() {
         TrackBankManager manager = mock(TrackBankManager.class);
-        com.bitwig.extension.controller.api.Track root =
-            mock(com.bitwig.extension.controller.api.Track.class);
-        when(manager.getCanonicalTrack(1)).thenReturn(root);
         when(manager.canonicalBankSlot(1)).thenReturn(2);
         DeviceBank prepared = mock(DeviceBank.class);
-        when(prepared.getSizeOfBank()).thenReturn(1);
-        doReturn(observedInteger(1)).when(prepared).itemCount();
-        Device device = mock(Device.class);
-        warmDevice(device, "Keys", new String[0], false, false);
-        when(prepared.getItemAt(0)).thenReturn(device);
+        when(prepared.getSizeOfBank()).thenReturn(2);
+        doReturn(observedInteger(2)).when(prepared).itemCount();
+        Device rack = mock(Device.class);
+        warmDevice(rack, "Layer Rack", new String[0], true, false);
+        Device drum = mock(Device.class);
+        warmDevice(drum, "Drum Machine", new String[0], false, true);
+        when(prepared.getItemAt(0)).thenReturn(rack);
+        when(prepared.getItemAt(1)).thenReturn(drum);
         DeviceBank[] flatSlotBanks = new DeviceBank[16];
         flatSlotBanks[2] = prepared;
         JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
@@ -661,168 +661,99 @@ class DeviceHandlerTest {
             mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
             (task, delay) -> task.run(), manager, flatSlotBanks)
             .register(chainDispatcher);
+
+        clearInvocations(prepared, rack, drum);
         chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":1}"));
         JsonObject result = rpcResult(chainDispatcher.handle(
             rpc("device/getChainResult", "{\"scanId\":1}")));
-        assertEquals(1, result.get("topLevelDeviceCount").getAsInt());
-        assertEquals(1, result.get("topLevelReturnedCount").getAsInt());
-        assertEquals("Keys", result.getAsJsonArray("nodes").get(0)
+
+        assertEquals(2, result.get("topLevelDeviceCount").getAsInt());
+        assertEquals(2, result.get("topLevelReturnedCount").getAsInt());
+        assertEquals(2, result.get("returnedCount").getAsInt());
+        JsonObject counts = result.getAsJsonObject("returnedNodeCounts");
+        assertEquals(2, counts.get("devices").getAsInt());
+        assertEquals(0, counts.get("layers").getAsInt());
+        assertEquals(0, counts.get("pads").getAsInt());
+        assertEquals("Layer Rack", result.getAsJsonArray("nodes").get(0)
             .getAsJsonObject().get("name").getAsString());
         assertTrue(result.getAsJsonArray("nodes").get(0)
             .getAsJsonObject().get("parentPath").isJsonNull());
-        verify(root, never()).createDeviceBank(anyInt());
-        verify(manager).canonicalBankSlot(1);
+        assertFalse(result.get("complete").getAsBoolean());
+        assertEquals(2, result.getAsJsonArray("warnings").size());
+        assertContains(result.toString(), "DEVICE_NESTED_CONTENTS_UNAVAILABLE");
+        assertContains(result.toString(), "layers");
+        assertContains(result.toString(), "drum pads");
+        verifyNoInteractions(prepared, rack, drum);
         verifyNoInteractions(mockCursorTrack, mockCursorDevice);
     }
 
     @Test
-    void listChainTraversesPreorderWithin48NodeBudget() {
+    void listChainTopLevelBudgetAndOpaqueSlotsAreSeparateWarnings() {
         TrackBankManager manager = mock(TrackBankManager.class);
-        com.bitwig.extension.controller.api.Track root =
-            mock(com.bitwig.extension.controller.api.Track.class);
+        when(manager.canonicalBankSlot(0)).thenReturn(0);
         DeviceBank rootBank = mock(DeviceBank.class);
-        when(manager.getCanonicalTrack(0)).thenReturn(root);
-        when(root.createDeviceBank(anyInt())).thenReturn(rootBank);
         when(rootBank.getSizeOfBank()).thenReturn(49);
-        doReturn(observedInteger(17)).when(rootBank).itemCount();
-
-        Device rack = mock(Device.class);
-        warmDevice(rack, "Drum Machine", new String[0], false, true);
-        DrumPadBank pads = mock(DrumPadBank.class);
-        when(rack.createDrumPadBank(128)).thenReturn(pads);
-        for (int note = 0; note < 128; note++) {
-            DrumPad pad = mock(DrumPad.class);
-            when(pads.getItemAt(note)).thenReturn(pad);
-            if (note >= 36 && note < 52) {
-                doReturn(observedBoolean(true)).when(pad).exists();
-                doReturn(observedName("Pad " + note)).when(pad).name();
-                DeviceBank childBank = mock(DeviceBank.class);
-                when(pad.createDeviceBank(anyInt())).thenReturn(childBank);
-                when(childBank.getSizeOfBank()).thenReturn(1);
-                doReturn(observedInteger(1)).when(childBank).itemCount();
-                Device child = mock(Device.class);
-                warmDevice(child, "Sampler " + note, new String[0], false, false);
-                when(childBank.getItemAt(0)).thenReturn(child);
-            } else doReturn(observedBoolean(false)).when(pad).exists();
+        doReturn(observedInteger(49)).when(rootBank).itemCount();
+        for (int position = 0; position < 49; position++) {
+            Device device = mock(Device.class);
+            warmDevice(device, "Effect " + position,
+                position == 0 ? new String[]{"Sidechain"} : new String[0],
+                false, false);
+            when(rootBank.getItemAt(position)).thenReturn(device);
         }
-        when(rootBank.getItemAt(0)).thenReturn(rack);
-        for (int position = 1; position <= 16; position++) {
-            Device effect = mock(Device.class);
-            warmDevice(effect, "Effect " + position, new String[0], false, false);
-            when(rootBank.getItemAt(position)).thenReturn(effect);
-        }
-        for (int position = 17; position < 49; position++) {
-            Device absent = mock(Device.class);
-            doReturn(observedBoolean(false)).when(absent).exists();
-            when(rootBank.getItemAt(position)).thenReturn(absent);
-        }
-
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[0] = rootBank;
         JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
         new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
             mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
-            (task, delay) -> task.run(), manager).register(chainDispatcher);
-        String started = chainDispatcher.handle(rpc("device/listChain",
-            "{\"trackIndex\":0}"));
-        assertContains(started, "\"scanId\":1");
-        JsonObject result = rpcResult(chainDispatcher.handle(rpc("device/getChainResult",
-            "{\"scanId\":1}")));
-        JsonArray nodes = result.getAsJsonArray("nodes");
-        assertEquals(48, nodes.size(), "node 49 must not be returned");
-        assertEquals(48, result.get("returnedCount").getAsInt());
-        assertEquals(17, result.get("topLevelDeviceCount").getAsInt());
-        assertEquals(16, result.get("topLevelReturnedCount").getAsInt());
-        JsonObject kinds = result.getAsJsonObject("returnedNodeCounts");
-        assertEquals(32, kinds.get("devices").getAsInt());
-        assertEquals(16, kinds.get("pads").getAsInt());
-        assertEquals(0, kinds.get("layers").getAsInt());
-        assertEquals("device", nodes.get(32).getAsJsonObject()
-            .get("kind").getAsString(), "rack is 1 + 16 pad + 16 child nodes");
-        assertEquals("device", nodes.get(33).getAsJsonObject()
-            .get("kind").getAsString(), "following effect starts at node 34");
-        assertEquals("device", nodes.get(0).getAsJsonObject().get("kind").getAsString());
-        assertEquals("pad", nodes.get(1).getAsJsonObject().get("kind").getAsString());
-        assertEquals(36, nodes.get(1).getAsJsonObject().get("note").getAsInt());
-        assertEquals("device", nodes.get(2).getAsJsonObject().get("kind").getAsString());
-        JsonArray padChildPath = nodes.get(2).getAsJsonObject().getAsJsonArray("path");
-        assertEquals(3, padChildPath.size());
-        assertEquals(0, padChildPath.get(0).getAsJsonObject()
-            .get("devicePosition").getAsInt());
-        assertEquals(36, padChildPath.get(1).getAsJsonObject().get("note").getAsInt());
-        assertEquals(0, padChildPath.get(2).getAsJsonObject()
-            .get("devicePosition").getAsInt());
-        assertEquals(15, result.getAsJsonArray("lastReturnedPath").get(0)
-            .getAsJsonObject().get("devicePosition").getAsInt());
-        assertFalse(result.get("complete").getAsBoolean());
-        assertContains(result.toString(), "DEVICE_CHAIN_TRUNCATED");
-        assertContains(result.toString(), "devicePosition");
+            (task, delay) -> task.run(), manager, flatSlotBanks)
+            .register(chainDispatcher);
 
-        // A separate reachable layer graph proves empty containers are rows.
-        Device layerDevice = mock(Device.class);
-        warmDevice(layerDevice, "Instrument Layer", new String[0], true, false);
-        DeviceLayerBank layerBank = mock(DeviceLayerBank.class);
-        when(layerDevice.createLayerBank(anyInt())).thenReturn(layerBank);
-        when(layerBank.getSizeOfBank()).thenReturn(2);
-        doReturn(observedInteger(2)).when(layerBank).itemCount();
-        for (int index = 0; index < 2; index++) {
-            DeviceLayer layer = mock(DeviceLayer.class);
-            when(layerBank.getItemAt(index)).thenReturn(layer);
-            doReturn(observedBoolean(true)).when(layer).exists();
-            doReturn(observedName("Layer " + index)).when(layer).name();
-            DeviceBank empty = mock(DeviceBank.class);
-            when(layer.createDeviceBank(anyInt())).thenReturn(empty);
-            when(empty.getSizeOfBank()).thenReturn(1);
-            doReturn(observedInteger(0)).when(empty).itemCount();
-            Device absent = mock(Device.class);
-            doReturn(observedBoolean(false)).when(absent).exists();
-            when(empty.getItemAt(0)).thenReturn(absent);
-        }
-        DeviceBank layerRootBank = mock(DeviceBank.class);
-        when(layerRootBank.getSizeOfBank()).thenReturn(1);
-        doReturn(observedInteger(1)).when(layerRootBank).itemCount();
-        when(layerRootBank.getItemAt(0)).thenReturn(layerDevice);
-        when(root.createDeviceBank(anyInt())).thenReturn(layerRootBank);
         chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}"));
-        JsonObject layersResult = rpcResult(chainDispatcher.handle(
-            rpc("device/getChainResult", "{\"scanId\":2}")));
-        JsonArray layerNodes = layersResult.getAsJsonArray("nodes");
-        assertEquals(3, layerNodes.size());
-        assertEquals("layer", layerNodes.get(1).getAsJsonObject()
-            .get("kind").getAsString());
-        assertEquals("layer", layerNodes.get(2).getAsJsonObject()
-            .get("kind").getAsString());
-        assertEquals(0, layerNodes.get(1).getAsJsonObject().get("layerIndex").getAsInt());
-        assertEquals(1, layerNodes.get(2).getAsJsonObject().get("layerIndex").getAsInt());
-        assertEquals(2, layerNodes.get(1).getAsJsonObject()
-            .getAsJsonArray("path").size());
-        assertEquals(3, layersResult.get("returnedCount").getAsInt());
+        JsonObject result = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":1}")));
+        JsonArray nodes = result.getAsJsonArray("nodes");
+        assertEquals(48, nodes.size());
+        assertEquals(49, result.get("topLevelDeviceCount").getAsInt());
+        assertEquals(48, result.get("topLevelReturnedCount").getAsInt());
+        JsonObject counts = result.getAsJsonObject("returnedNodeCounts");
+        assertEquals(48, counts.get("devices").getAsInt());
+        assertEquals(0, counts.get("layers").getAsInt());
+        assertEquals(0, counts.get("pads").getAsInt());
+        assertFalse(result.get("complete").getAsBoolean());
+        assertEquals(2, result.getAsJsonArray("warnings").size());
+        assertContains(result.toString(), "DEVICE_SLOT_CONTENTS_UNAVAILABLE");
+        assertContains(result.toString(), "DEVICE_CHAIN_TRUNCATED");
+        assertEquals(47, result.getAsJsonArray("lastReturnedPath").get(0)
+            .getAsJsonObject().get("devicePosition").getAsInt());
         verifyNoInteractions(mockCursorTrack, mockCursorDevice);
     }
 
     @Test
-    void listChainReportsOpaqueSlotsColdFieldsAndNeverMovesCursor() {
+    void listChainReportsColdFieldsAndNeverMovesCursor() {
         TrackBankManager manager = mock(TrackBankManager.class);
-        com.bitwig.extension.controller.api.Track root =
-            mock(com.bitwig.extension.controller.api.Track.class);
-        when(manager.getCanonicalTrack(0)).thenReturn(root);
+        when(manager.canonicalBankSlot(0)).thenReturn(0);
         DeviceBank bank = mock(DeviceBank.class);
-        when(root.createDeviceBank(anyInt())).thenReturn(bank);
         when(bank.getSizeOfBank()).thenReturn(1);
-        doReturn(mock(IntegerValue.class)).when(bank).itemCount(); // cold count
+        doReturn(mock(IntegerValue.class)).when(bank).itemCount();
         Device device = mock(Device.class);
         doReturn(observedBoolean(true)).when(device).exists();
         doReturn(observedName("FX Layer")).when(device).name();
-        doReturn(mock(BooleanValue.class)).when(device).isPlugin(); // cold field
+        doReturn(mock(BooleanValue.class)).when(device).isPlugin();
         doReturn(observedEnabled(false)).when(device).isEnabled();
         doReturn(observedSlots("FX", "Post FX")).when(device).slotNames();
         doReturn(observedBoolean(false)).when(device).hasLayers();
         doReturn(observedBoolean(false)).when(device).hasDrumPads();
         when(bank.getItemAt(0)).thenReturn(device);
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[0] = bank;
 
         List<Runnable> scheduled = new ArrayList<>();
         JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
         new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
             mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
-            (task, delay) -> scheduled.add(task), manager).register(chainDispatcher);
+            (task, delay) -> scheduled.add(task), manager, flatSlotBanks)
+            .register(chainDispatcher);
         String started = chainDispatcher.handle(rpc("device/listChain",
             "{\"trackIndex\":0}"));
         assertContains(started, "\"scanId\":1");
@@ -831,7 +762,7 @@ class DeviceHandlerTest {
         assertContains(overlap, "DEVICE_CHAIN_SCAN_IN_PROGRESS");
         assertContains(chainDispatcher.handle(rpc("device/getChainResult",
             "{\"scanId\":1}")), "\"scanning\":true");
-        for (int i = 0; i < scheduled.size(); i++) scheduled.get(i).run();
+        scheduled.forEach(Runnable::run);
         JsonObject result = rpcResult(chainDispatcher.handle(
             rpc("device/getChainResult", "{\"scanId\":1}")));
         assertEquals(1, result.get("returnedCount").getAsInt());
@@ -842,8 +773,6 @@ class DeviceHandlerTest {
         assertTrue(row.get("isPlugin").isJsonNull());
         assertFalse(row.get("isEnabled").getAsBoolean());
         assertEquals(2, row.getAsJsonArray("slotNames").size());
-        assertTrue(row.has("hasLayers"));
-        assertTrue(row.has("hasDrumPads"));
         assertContains(result.toString(), "DEVICE_FIELD_UNOBSERVED");
         assertContains(result.toString(), "DEVICE_TOP_LEVEL_COUNT_UNOBSERVED");
         assertContains(result.toString(), "DEVICE_SLOT_CONTENTS_UNAVAILABLE");
