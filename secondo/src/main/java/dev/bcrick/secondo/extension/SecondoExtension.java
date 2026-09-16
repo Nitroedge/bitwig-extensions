@@ -213,11 +213,11 @@ public class SecondoExtension extends ControllerExtension {
         });
 
         // Register handlers
-        new ApplicationHandler(application, host, trackBank).register(dispatcher);
+        new ApplicationHandler(application, host, trackBankManager).register(dispatcher);
         new TransportHandler(transport, stateCache).register(dispatcher);
         new TrackHandler(trackBank, application, cursorTrack, trackBankManager, stateCache, noteInput).register(dispatcher);
         new MasterHandler(masterTrack).register(dispatcher);
-        new ClipHandler(trackBank, trackBank.sceneBank(), cursorClip, stateCache).register(dispatcher);
+        new ClipHandler(trackBankManager, trackBank.sceneBank(), cursorClip, stateCache).register(dispatcher);
         DeviceLibrary deviceLibrary = resolveDeviceLibrary();
         new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank,
             deviceLibrary, transport, host, host::scheduleTask, trackBankManager,
@@ -227,7 +227,7 @@ public class SecondoExtension extends ControllerExtension {
         new SceneHandler(trackBank.sceneBank(), project, stateCache).register(dispatcher);
         new ArrangerHandler(arranger, transport, cueMarkerBank, arranger.getHorizontalScrollbarModel(), stateCache).register(dispatcher);
         new MasterDeviceHandler(masterTrack, masterCursorDevice, masterRemoteControlsPage, deviceLibrary, host::scheduleTask).register(dispatcher);
-        new SendHandler(trackBank, SEND_COUNT).register(dispatcher);
+        new SendHandler(trackBankManager, SEND_COUNT).register(dispatcher);
         new ProjectHandler(project, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);
         new BrowserHandler(popupBrowser, cursorDevice, stateCache).register(dispatcher);

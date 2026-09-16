@@ -6,7 +6,7 @@ group = "dev.bcrick"
 // Pinned equal to dev.bcrick.secondo.SecondoVersion.VERSION by VersionConsistencyTest, which
 // reads this line as text -- a JUnit test cannot see a Gradle value any other way. D-21-H: one
 // version string. Move this and the constant together, or the test fails naming both.
-version = "0.2.2"
+version = "0.2.3"
 
 val bitwigExtensionsDir: String by project
 

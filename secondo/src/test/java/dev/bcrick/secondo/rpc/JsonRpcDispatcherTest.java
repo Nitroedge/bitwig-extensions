@@ -58,6 +58,32 @@ class JsonRpcDispatcherTest {
         assertTrue(batch.get("activated").isJsonNull());
     }
 
+    /**
+     * WR-08, the other half of the blast radius. Six of this file's twenty-five
+     * JsonNull.INSTANCE sites are error-envelope ids, and they are the JSON-RPC 2.0 id null the
+     * spec requires when a request could not be parsed far enough to have an id. Gson omits
+     * JsonNull members by default, so before serializeNulls() those envelopes shipped with NO id
+     * member at all -- a spec violation the flag fixed as a side effect of a device-schema
+     * decision. Asserted here so a serializer-level change is caught rather than reasoned about.
+     */
+    @Test
+    void errorEnvelopesCarryAnExplicitNullIdWhenTheRequestHadNone() {
+        JsonObject parseError = JsonParser.parseString(dispatcher.handle("{invalid json"))
+            .getAsJsonObject();
+        assertTrue(parseError.has("id"), "a parse-error envelope must carry an id member");
+        assertTrue(parseError.get("id").isJsonNull());
+
+        JsonObject notAnObject = JsonParser.parseString(dispatcher.handle("\"a string\""))
+            .getAsJsonObject();
+        assertTrue(notAnObject.has("id"));
+        assertTrue(notAnObject.get("id").isJsonNull());
+
+        JsonObject emptyBatch = JsonParser.parseString(dispatcher.handle("[]"))
+            .getAsJsonObject();
+        assertTrue(emptyBatch.has("id"));
+        assertTrue(emptyBatch.get("id").isJsonNull());
+    }
+
     @Test
     void returnsMethodNotFound() {
         String request = """

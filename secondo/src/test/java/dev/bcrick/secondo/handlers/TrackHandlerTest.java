@@ -68,6 +68,9 @@ class TrackHandlerTest {
         // Common stub: trackBank returns track at index 0
         when(mockTrackBank.getSizeOfBank()).thenReturn(8);
         when(mockTrackBank.getItemAt(0)).thenReturn(mockTrack);
+        // CR-03: every indexed track method now resolves through the one canonical resolver,
+        // so the mock manager has to answer for public index 0 the way the bank used to.
+        when(mockTrackBankManager.getCanonicalTrack(0)).thenReturn(mockTrack);
 
         // Common stub: cursorTrack.name() for cursorResponse()
         when(mockCursorTrack.name()).thenReturn(mockNameValue);
@@ -627,6 +630,69 @@ class TrackHandlerTest {
             java.util.List.of(group, child), true, 2, 16, true, 1
         );
     }
+    // --- CR-03: one coordinate ---
+
+    /**
+     * THE TEST THAT WOULD HAVE CAUGHT CR-03. This is the exact divergence the finding names:
+     * track/setActivated already resolved through the canonical mapping while track/setMute
+     * subscripted the flat bank raw, so under a non-identity mapping the two acted on DIFFERENT
+     * tracks for the same number and the verification read confirmed either one as correct.
+     *
+     * <p>A real TrackBankManager is used rather than the mock, because the thing under test is
+     * the mapping itself: bank slot 1 is observed not existing, so public index 1 is bank slot
+     * 2. Both methods must land on the slot-2 proxy, and neither may touch slot 1.</p>
+     */
+    @Test
+    void indexedTrackMethods_underNonIdentityMapping_addressOneCanonicalTrack() {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        SettableBooleanValue slotTwoMute = mock(SettableBooleanValue.class);
+        SettableBooleanValue slotTwoActivated = mock(SettableBooleanValue.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+        when(slotTwoTrack.mute()).thenReturn(slotTwoMute);
+        when(slotTwoTrack.isActivated()).thenReturn(slotTwoActivated);
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack, manager,
+            new StateCache(), mockNoteInput).register(local);
+
+        local.handle(rpc("track/setMute", "{\"index\":1,\"muted\":true}"));
+        local.handle(rpc("track/setActivated", "{\"index\":1,\"activated\":false}"));
+
+        verify(slotTwoMute).set(true);
+        verify(slotTwoActivated).set(false);
+        verify(slotOneTrack, never()).mute();
+        verify(slotOneTrack, never()).isActivated();
+    }
+
+    /**
+     * The range refusal moved with the resolver. TrackBankManager.canonicalBankSlot owns the
+     * wording, and it names the OBSERVABLE CANONICAL TRACK COUNT rather than the bank width
+     * alone -- which is the number a caller can actually act on.
+     */
+    @Test
+    void indexedTrackMethod_pastTheCanonicalCount_isRefusedByTheResolver() {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        for (int slot = 1; slot < 8; slot++) {
+            manager.observeCanonicalExists(slot, false);
+        }
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack, manager,
+            new StateCache(), mockNoteInput).register(local);
+
+        String response = local.handle(rpc("track/setMute", "{\"index\":1,\"muted\":true}"));
+        assertContains(response, "-32602");
+        assertContains(response, "Observable canonical track count is 1");
+    }
+
     // --- Helpers ---
 
     private String rpc(String method, String params) {

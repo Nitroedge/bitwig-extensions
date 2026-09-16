@@ -398,11 +398,26 @@ public class TrackHandler {
         }
         return result;
     }
+    /**
+     * ONE COORDINATE. Public wire indices are canonical: StateCache publishes
+     * {@code row.trackIndex()} as a track row's {@code index}, and this method consumes that
+     * same number. The physical flat-bank slot behind it is never a wire value and is never
+     * handed to a caller.
+     *
+     * <p>Before 2026-09-16 this method subscripted the flat bank raw while
+     * {@code track/setActivated} resolved through {@code TrackBankManager.getCanonicalTrack}.
+     * The two agreed only because the flat bank fills contiguously and an unobserved
+     * {@code exists} counts as present, neither of which is contractual (25-REVIEW CR-03). The
+     * moment one filtered slot precedes a kept one, the two coordinates diverge and the
+     * verification read confirms the wrong track as correct. Every indexed track method in this
+     * handler, plus {@code ClipHandler.getSlotBank}, {@code SendHandler.getSend} and
+     * {@code app/navigateIntoTrackGroup}, now resolve through this one resolver.</p>
+     *
+     * <p>Range refusal belongs to {@code TrackBankManager.canonicalBankSlot}, whose message
+     * names the observable canonical track count and the bank width.</p>
+     */
     private Track getTrack(int index) {
-        if (index < 0 || index >= trackBank.getSizeOfBank()) {
-            throw new IllegalArgumentException("track index out of range: " + index);
-        }
-        return (Track) trackBank.getItemAt(index);
+        return trackBankManager.getCanonicalTrack(index);
     }
 
     private JsonObject ok() {

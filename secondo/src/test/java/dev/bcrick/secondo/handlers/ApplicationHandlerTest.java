@@ -34,7 +34,11 @@ class ApplicationHandlerTest {
     @BeforeEach
     void setUp() {
         dispatcher = new JsonRpcDispatcher();
-        new ApplicationHandler(mockApplication, mockHost, mockTrackBank).register(dispatcher);
+        // A REAL TrackBankManager over the mock bank: with nothing observed the canonical
+        // mapping is the identity, so the stubs below keep meaning what they meant before CR-03
+        // routed this handler through the resolver.
+        new ApplicationHandler(mockApplication, mockHost, new TrackBankManager(mockTrackBank, 8))
+            .register(dispatcher);
     }
 
     // --- Registration ---
@@ -232,6 +236,33 @@ class ApplicationHandlerTest {
         dispatcher.handle(rpc("app/navigateIntoTrackGroup", "{\"trackIndex\":2}"));
 
         verify(mockApplication).navigateIntoTrackGroup(mockTrack);
+    }
+
+    /**
+     * THE TEST THAT WOULD HAVE CAUGHT CR-03 for group navigation. Bank slot 1 is observed not
+     * existing, so public index 1 resolves to bank slot 2. Before the fix this registration
+     * subscripted the flat bank raw and would have navigated into a different group than the one
+     * the snapshot calls index 1.
+     */
+    @Test
+    void navigateIntoTrackGroup_underNonIdentityMapping_addressesTheCanonicalTrack() {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new ApplicationHandler(mockApplication, mockHost, manager).register(local);
+
+        local.handle(rpc("app/navigateIntoTrackGroup", "{\"trackIndex\":1}"));
+
+        verify(mockApplication).navigateIntoTrackGroup(slotTwoTrack);
+        verify(mockApplication, never()).navigateIntoTrackGroup(slotOneTrack);
     }
 
     @Test

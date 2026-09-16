@@ -1,6 +1,7 @@
 package dev.bcrick.secondo.handlers;
 
 import com.bitwig.extension.controller.api.ControllerHost;
+import com.bitwig.extension.controller.api.Track;
 import com.bitwig.extension.controller.api.TrackBank;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -183,6 +184,28 @@ class TrackBankManagerTest {
         assertTrue(mapped.isTrackIdentityRequired(1));
         assertThrows(IllegalArgumentException.class, () -> mapped.canonicalBankSlot(2),
             "a missing current flat entry must take the ordinary range path");
+    }
+
+    /**
+     * CR-03's resolver, asserted on the proxy rather than only on the number. Every indexed
+     * engine method now goes through getCanonicalTrack, so the mapping being right about slot
+     * numbers is not enough -- the Track handed back has to be the one at that slot.
+     */
+    @Test
+    void getCanonicalTrackReturnsTheProxyAtTheMappedSlot() {
+        TrackBank flatDocumentBank = mock(TrackBank.class);
+        Track slotTwo = mock(Track.class);
+        when(flatDocumentBank.getItemAt(2)).thenReturn(slotTwo);
+
+        TrackBankManager mapped = new TrackBankManager(flatDocumentBank, 8);
+        mapped.observeCanonicalExists(0, true);
+        mapped.observeCanonicalExists(1, false);
+        mapped.observeCanonicalExists(2, true);
+
+        assertEquals(2, mapped.canonicalBankSlot(1));
+        assertSame(slotTwo, mapped.getCanonicalTrack(1),
+            "public index 1 must resolve to the proxy at bank slot 2, never to slot 1's");
+        verify(flatDocumentBank, never()).getItemAt(1);
     }
 
 }

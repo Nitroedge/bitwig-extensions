@@ -35,6 +35,21 @@ public class DeviceHandler {
     private static final long FLUSH_DELAY_MS = 100;
     private static final int CHAIN_NODE_BUDGET = 48;
     public static final int CHAIN_ROOT_BANK_WIDTH = CHAIN_NODE_BUDGET + 1;
+    /**
+     * How long a started chain scan may stay in progress before the next {@code device/listChain}
+     * treats it as abandoned (25-REVIEW WR-06).
+     *
+     * <p>Before this, {@code chainScanInProgress} was set inside the lock and cleared only by
+     * {@code ChainScanJob.finish()}, which runs only if {@code advance()} runs. A scheduled task
+     * that never fired latched the flag true and every later {@code device/listChain} threw
+     * {@code DEVICE_CHAIN_SCAN_IN_PROGRESS} for the rest of the session, with no deadline and no
+     * reset.</p>
+     *
+     * <p>15 seconds is deliberately ABOVE the Python caller's own ceiling
+     * ({@code CHAIN_SCAN_CEILING_MS = 10_000} in {@code src/secondo/tools/device.py}), so a scan
+     * the caller has already given up on is reclaimed by the next call rather than racing it.</p>
+     */
+    static final long CHAIN_SCAN_STALE_MS = 15_000;
     static final Set<String> VALID_PAGE_TAGS = Set.of(
         "env", "eq", "filter", "fx", "lfo", "mixer", "osc", "perf"
     );
@@ -49,9 +64,15 @@ public class DeviceHandler {
     private final TaskScheduler scheduler;
     private final TrackBankManager trackBankManager;
     private final PreparedChainBank[] canonicalDeviceBanks;
+    // Fully qualified rather than imported on purpose: an added import line would shift
+    // PARAM_COUNT above, and src/secondo/models.py cites that declaration BY LINE NUMBER
+    // (tests/test_conformance.py asserts the cited line still carries it).
+    private final java.util.function.LongSupplier clock;
     private volatile boolean chainScanInProgress = false;
     private volatile JsonObject chainScanResult = null;
     private volatile int chainScanId = 0;
+    private volatile long chainScanStartedAtMs = 0L;
+    private volatile ChainScanJob chainScanCurrentJob = null;
 
     // Discovery state
     private volatile JsonObject discoveryResult = null;
@@ -81,6 +102,22 @@ public class DeviceHandler {
                          Transport transport, ControllerHost host,
                          TaskScheduler scheduler, TrackBankManager trackBankManager,
                          DeviceBank[] canonicalDeviceBanks) {
+        this(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary,
+            transport, host, scheduler, trackBankManager, canonicalDeviceBanks,
+            System::currentTimeMillis);
+    }
+
+    /**
+     * Clock-injecting overload. Package-private because the only caller that needs a clock other
+     * than the wall clock is {@code DeviceHandlerTest}, which advances it past
+     * {@link #CHAIN_SCAN_STALE_MS} to prove a stalled scan is reclaimed (25-REVIEW WR-06).
+     */
+    DeviceHandler(CursorTrack cursorTrack, CursorDevice cursorDevice,
+                  CursorRemoteControlsPage remoteControlsPage,
+                  DrumPadBank drumPadBank, DeviceLibrary deviceLibrary,
+                  Transport transport, ControllerHost host,
+                  TaskScheduler scheduler, TrackBankManager trackBankManager,
+                  DeviceBank[] canonicalDeviceBanks, java.util.function.LongSupplier clock) {
         this.cursorTrack = cursorTrack;
         this.cursorDevice = cursorDevice;
         this.remoteControlsPage = remoteControlsPage;
@@ -91,6 +128,7 @@ public class DeviceHandler {
         this.scheduler = scheduler;
         this.trackBankManager = trackBankManager;
         this.canonicalDeviceBanks = prepareCanonicalDeviceBanks(canonicalDeviceBanks);
+        this.clock = clock;
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -101,9 +139,20 @@ public class DeviceHandler {
             if (trackBankManager == null) {
                 throw new IllegalStateException("Canonical track bank is unavailable");
             }
+            int startedScanId;
             synchronized (this) {
                 if (chainScanInProgress) {
-                    throw new IllegalStateException("DEVICE_CHAIN_SCAN_IN_PROGRESS");
+                    // WR-06: a scan whose scheduled task never fired used to latch this flag
+                    // true for the rest of the session. Past the ceiling the old job is marked
+                    // finished, so a late advance is ignored, and the new scan starts.
+                    if (clock.getAsLong() - chainScanStartedAtMs < CHAIN_SCAN_STALE_MS) {
+                        throw new IllegalStateException("DEVICE_CHAIN_SCAN_IN_PROGRESS");
+                    }
+                    if (chainScanCurrentJob != null) {
+                        chainScanCurrentJob.abandon();
+                    }
+                    chainScanCurrentJob = null;
+                    chainScanInProgress = false;
                 }
                 int bankSlot = trackBankManager.canonicalBankSlot(trackIndex);
                 PreparedChainBank rootBank = canonicalDeviceBanks == null ? null
@@ -112,19 +161,26 @@ public class DeviceHandler {
                     throw new IllegalStateException(
                         "Canonical device bank is unavailable for track " + trackIndex);
                 }
-                ChainScanJob job = new ChainScanJob(rootBank, ++chainScanId);
+                // WR-06: capture the id INSIDE the lock. The caller keys its whole poll loop on
+                // this number, and reading the mutable field after the critical section ended
+                // was the one unprotected read in a method that is otherwise fully guarded.
+                startedScanId = ++chainScanId;
+                ChainScanJob job = new ChainScanJob(rootBank, startedScanId);
+                chainScanCurrentJob = job;
                 chainScanResult = null;
                 chainScanInProgress = true;
+                chainScanStartedAtMs = clock.getAsLong();
                 try {
                     scheduler.schedule(job::advance, FLUSH_DELAY_MS);
                 } catch (RuntimeException error) {
                     chainScanInProgress = false;
+                    chainScanCurrentJob = null;
                     throw error;
                 }
             }
             JsonObject response = new JsonObject();
             response.addProperty("scanning", true);
-            response.addProperty("scanId", chainScanId);
+            response.addProperty("scanId", startedScanId);
             return response;
         });
         dispatcher.register("device/getChainResult", params -> {
@@ -136,7 +192,10 @@ public class DeviceHandler {
                 if (chainScanInProgress) {
                     JsonObject response = new JsonObject();
                     response.addProperty("scanning", true);
-                    response.addProperty("scanId", chainScanId);
+                    // requestedId, not the mutable field: the guard above already proved the
+                    // two equal, and echoing the caller's own id keeps every scanId on the wire
+                    // sourced from a value captured under this lock (WR-06).
+                    response.addProperty("scanId", requestedId);
                     return response;
                 }
                 if (chainScanResult == null) {
@@ -694,26 +753,38 @@ public class DeviceHandler {
         volatile T value;
     }
 
+    // 25-REVIEW WR-09: markInterested() before addValueObserver in every overload, matching the
+    // convention every other observer registration in this engine follows (StateCache, and
+    // TrackBankManager.registerObservers added in the same phase). The live chain read worked
+    // without it, so this is a consistency fix rather than a live failure -- but the failure
+    // mode if a type ever does need the subscription is silent: every device field comes back
+    // null with DEVICE_FIELD_UNOBSERVED, which reads as a cold cache rather than as a missing
+    // subscription, and an unmarked overload reads as intentional to the next author.
+
     private static Observed<Boolean> observe(BooleanValue value) {
         Observed<Boolean> observed = new Observed<>();
+        value.markInterested();
         value.addValueObserver(v -> observed.value = v);
         return observed;
     }
 
     private static Observed<Integer> observe(IntegerValue value) {
         Observed<Integer> observed = new Observed<>();
+        value.markInterested();
         value.addValueObserver(v -> observed.value = v);
         return observed;
     }
 
     private static Observed<String> observe(StringValue value) {
         Observed<String> observed = new Observed<>();
+        value.markInterested();
         value.addValueObserver(v -> observed.value = v);
         return observed;
     }
 
     private static Observed<String[]> observe(StringArrayValue value) {
         Observed<String[]> observed = new Observed<>();
+        value.markInterested();
         value.addValueObserver(v -> observed.value = v == null ? null : v.clone());
         return observed;
     }
@@ -773,6 +844,15 @@ public class DeviceHandler {
         ChainScanJob(PreparedChainBank root, int scanId) {
             this.root = root;
             this.scanId = scanId;
+        }
+
+        /**
+         * Retire a scan the handler has given up on (25-REVIEW WR-06). A later {@code advance()}
+         * from the scheduler returns immediately, so an abandoned job can never publish a result
+         * over the scan that replaced it.
+         */
+        void abandon() {
+            finished = true;
         }
 
         private JsonArray devicePath(int position) {

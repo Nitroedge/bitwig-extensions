@@ -60,7 +60,11 @@ class ClipHandlerTest {
     @BeforeEach
     void setUp() {
         dispatcher = new JsonRpcDispatcher();
-        new ClipHandler(mockTrackBank, mockSceneBank, mockCursorClip, new StateCache()).register(dispatcher);
+        // A REAL TrackBankManager over the mock bank, not a mock manager: with nothing observed
+        // the canonical mapping is the identity, so every stub below keeps meaning what it meant
+        // before CR-03 routed this handler through the resolver.
+        new ClipHandler(new TrackBankManager(mockTrackBank, 8), mockSceneBank, mockCursorClip,
+            new StateCache()).register(dispatcher);
 
         // Common stubs: trackBank → track → slotBank → slot
         when(mockTrackBank.getSizeOfBank()).thenReturn(8);
@@ -537,6 +541,39 @@ class ClipHandlerTest {
     void clipDuplicateContent_callsCursorClipDuplicateContent() {
         dispatcher.handle(rpc("clip/duplicateContent", "{}"));
         verify(mockCursorClip).duplicateContent();
+    }
+
+    // --- CR-03: one coordinate ---
+
+    /**
+     * THE TEST THAT WOULD HAVE CAUGHT CR-03. Under a non-identity canonical mapping -- bank slot
+     * 1 observed not existing, so public index 1 resolves to bank slot 2 -- clip/launch with
+     * trackIndex 1 must act on the track at bank slot 2. Before the fix this handler subscripted
+     * the flat bank raw and would have launched a clip on slot 1's track while the snapshot
+     * called slot 2's track index 1.
+     */
+    @Test
+    void clipLaunch_underNonIdentityMapping_addressesTheCanonicalTrack() {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        ClipLauncherSlotBank slotTwoBank = mock(ClipLauncherSlotBank.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+        when(slotTwoTrack.clipLauncherSlotBank()).thenReturn(slotTwoBank);
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new ClipHandler(manager, mockSceneBank, mockCursorClip, new StateCache())
+            .register(local);
+
+        local.handle(rpc("clip/launch", "{\"trackIndex\":1,\"slotIndex\":0}"));
+
+        verify(slotTwoBank).launch(0);
+        verify(slotOneTrack, never()).clipLauncherSlotBank();
     }
 
     // --- Helpers ---

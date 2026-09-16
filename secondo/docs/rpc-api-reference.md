@@ -529,6 +529,16 @@ Get all clip launcher settings from the transport.
 
 ## Track
 
+**One coordinate.** Every `index` / `trackIndex` on this wire is the CANONICAL public index -- the
+same number `session/snapshot` publishes as a track row's `index`. It is not a physical slot in the
+engine's flat track bank: the canonical mapping drops a slot whose `exists` was observed false and
+drops the master track, so the two can differ. Every indexed track method resolves the number the
+same way, through one resolver, so `track/setActivated`, `track/setMute`, `track/setVolume`,
+`clip/*`'s `trackIndex`, `send/*`'s `trackIndex` and `app/navigateIntoTrackGroup` always address the
+same track for the same number. An out-of-range index is refused with a message naming the
+observable canonical track count and the bank width, for example
+`Track index 7 out of range. Observable canonical track count is 5 within bank width 16.`
+
 ### `track/setVolume`
 
 Set the volume of a track. Volume is normalized 0.0 to 1.0.
@@ -1531,6 +1541,16 @@ Trigger the alternative launch release action for a scene.
 ---
 
 ## Device
+
+**Chain scans expire (`device/listChain`, `device/getChainResult`).** `device/listChain` starts one
+scheduled scan and answers immediately with a `scanId` captured under the lock that started it;
+`device/getChainResult` is polled with that same id. Only one scan may be in flight, and a second
+`device/listChain` while one is running is refused with `DEVICE_CHAIN_SCAN_IN_PROGRESS`. That
+refusal now has a deadline: a scan that has been in progress longer than 15 seconds is treated as
+abandoned, so the next `device/listChain` retires it and starts a fresh scan with a new `scanId`
+rather than refusing. A scheduled scan that never fires can therefore no longer latch the method
+off for the rest of the session. The ceiling sits above the caller's own give-up window on
+purpose, so a scan a caller has already stopped polling is reclaimed rather than raced.
 
 ### `device/selectNext`
 

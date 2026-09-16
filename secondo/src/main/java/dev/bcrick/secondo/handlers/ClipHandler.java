@@ -5,7 +5,6 @@ import com.bitwig.extension.controller.api.ClipLauncherSlot;
 import com.bitwig.extension.controller.api.ClipLauncherSlotBank;
 import com.bitwig.extension.controller.api.SceneBank;
 import com.bitwig.extension.controller.api.Track;
-import com.bitwig.extension.controller.api.TrackBank;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
@@ -26,13 +25,14 @@ public class ClipHandler {
         "default", "from_start", "continue_or_from_start", "continue_or_synced", "synced"
     );
 
-    private final TrackBank trackBank;
+    private final TrackBankManager trackBankManager;
     private final SceneBank sceneBank;
     private final Clip cursorClip;
     private final StateCache stateCache;
 
-    public ClipHandler(TrackBank trackBank, SceneBank sceneBank, Clip cursorClip, StateCache stateCache) {
-        this.trackBank = trackBank;
+    public ClipHandler(TrackBankManager trackBankManager, SceneBank sceneBank, Clip cursorClip,
+                       StateCache stateCache) {
+        this.trackBankManager = trackBankManager;
         this.sceneBank = sceneBank;
         this.cursorClip = cursorClip;
         this.stateCache = stateCache;
@@ -296,11 +296,13 @@ public class ClipHandler {
         });
     }
 
+    /**
+     * ONE COORDINATE (25-REVIEW CR-03). {@code trackIndex} is the canonical public index the
+     * snapshot published, resolved by the single resolver rather than subscripted raw. Range
+     * refusal and its wording belong to {@code TrackBankManager.canonicalBankSlot}.
+     */
     private ClipLauncherSlotBank getSlotBank(int trackIndex) {
-        if (trackIndex < 0 || trackIndex >= trackBank.getSizeOfBank()) {
-            throw new IllegalArgumentException("track index out of range: " + trackIndex);
-        }
-        Track track = (Track) trackBank.getItemAt(trackIndex);
+        Track track = trackBankManager.getCanonicalTrack(trackIndex);
         return track.clipLauncherSlotBank();
     }
 

@@ -1870,11 +1870,18 @@ public class StateCache {
         for (CanonicalTrackRow row : snapshot.rows()) {
             int i = row.bankSlot();
             JsonObject track = new JsonObject();
+            // ONE KEY PER FACT (25-REVIEW WR-15). Each row used to carry index AND trackIndex,
+            // type AND trackType, trackIdentityRequired AND identityRequired, all three pairs
+            // with the same value on both sides: six declarations of three facts, nothing
+            // pinning the pairs equal, and a snapshot that session/snapshot now reads on EVERY
+            // indexed mutation. The aliases trackIndex, type and identityRequired were removed
+            // on 2026-09-16, after plans 25-24 and 25-25 moved every Python and harness reader
+            // onto the survivors. uiNumber stays: it is a different fact (the 1-based number the
+            // user sees), not an alias of index. track/setActivated's activationResponse keeps
+            // its own trackIndex member, which is a RESPONSE field and not a snapshot row.
             track.addProperty("index", row.trackIndex());
-            track.addProperty("trackIndex", row.trackIndex());
             track.addProperty("uiNumber", row.trackIndex() + 1);
             track.addProperty("name", row.name());
-            track.addProperty("type", row.type());
             track.addProperty("trackType", row.type());
             if (row.parentIndex() == null) {
                 track.add("parentIndex", JsonNull.INSTANCE);
@@ -1893,7 +1900,6 @@ public class StateCache {
                 track.addProperty("effectiveActivated", row.effectiveActivated());
             }
             track.addProperty("trackIdentityRequired", row.identityRequired());
-            track.addProperty("identityRequired", row.identityRequired());
             if (row.position() == null) {
                 track.add("position", JsonNull.INSTANCE);
             } else {

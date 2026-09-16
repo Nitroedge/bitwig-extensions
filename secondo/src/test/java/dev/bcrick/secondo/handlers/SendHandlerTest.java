@@ -36,7 +36,10 @@ class SendHandlerTest {
     @BeforeEach
     void setUp() {
         dispatcher = new JsonRpcDispatcher();
-        new SendHandler(mockTrackBank, 4).register(dispatcher);
+        // A REAL TrackBankManager over the mock bank: with nothing observed the canonical
+        // mapping is the identity, so the stubs below keep meaning what they meant before CR-03
+        // routed this handler through the resolver.
+        new SendHandler(new TrackBankManager(mockTrackBank, 8), 4).register(dispatcher);
 
         // Common stub: trackBank returns track, track returns sendBank, sendBank returns send
         when(mockTrackBank.getSizeOfBank()).thenReturn(8);
@@ -106,6 +109,41 @@ class SendHandlerTest {
         dispatcher.handle(rpc("send/setEnabled", "{\"trackIndex\":0,\"sendIndex\":0,\"enabled\":true}"));
 
         verify(mockSendEnabled).set(true);
+    }
+
+    // --- CR-03: one coordinate ---
+
+    /**
+     * THE TEST THAT WOULD HAVE CAUGHT CR-03 for sends. Bank slot 1 is observed not existing, so
+     * public index 1 resolves to bank slot 2. Before the fix this handler subscripted the flat
+     * bank raw and would have changed a send level on the wrong track while the verification
+     * read confirmed the right one.
+     */
+    @Test
+    void setLevel_underNonIdentityMapping_addressesTheCanonicalTrack() {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        SendBank slotTwoSendBank = mock(SendBank.class);
+        Send slotTwoSend = mock(Send.class);
+        SettableRangedValue slotTwoValue = mock(SettableRangedValue.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+        when(slotTwoTrack.sendBank()).thenReturn(slotTwoSendBank);
+        when(slotTwoSendBank.getItemAt(0)).thenReturn(slotTwoSend);
+        when(slotTwoSend.value()).thenReturn(slotTwoValue);
+
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        new SendHandler(manager, 4).register(local);
+
+        local.handle(rpc("send/setLevel", "{\"trackIndex\":1,\"sendIndex\":0,\"value\":0.3}"));
+
+        verify(slotTwoValue).setImmediately(0.3);
+        verify(slotOneTrack, never()).sendBank();
     }
 
     // --- Helpers ---

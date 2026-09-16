@@ -131,35 +131,44 @@ public class TrackBankManager {
 
     synchronized void observeCanonicalExists(int slot, boolean exists) {
         canonicalExists[slot] = exists;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
     synchronized void observeCanonicalPosition(int slot, int position) {
         canonicalPositions[slot] = position;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
     synchronized void observeCanonicalType(int slot, String type) {
         canonicalTypes[slot] = type;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
     synchronized void observeLegacyExists(int slot, boolean exists) {
         legacyExists[slot] = exists;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
     synchronized void observeLegacyPosition(int slot, int position) {
         legacyPositions[slot] = position;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
     synchronized void observeLegacyName(int slot, String name) {
         legacyNames[slot] = name;
-        refreshMigrationEvidence(slot);
+        refreshMigrationEvidence();
     }
 
-    private void refreshMigrationEvidence(int ignoredSlot) {
+    /**
+     * Rebuild the migration evidence every observer callback can change.
+     *
+     * <p>25-REVIEW IN-04: this took an {@code int ignoredSlot} it never read -- the name
+     * announced the defect. The parameter is gone rather than used, because the canonical slot
+     * list this method rebuilds is a function of EVERY slot's exists and type, so one changed
+     * slot can move the public index of every slot after it. A per-slot refresh would be wrong,
+     * not just narrower.</p>
+     */
+    private void refreshMigrationEvidence() {
         if (stateCache == null) {
             return;
         }

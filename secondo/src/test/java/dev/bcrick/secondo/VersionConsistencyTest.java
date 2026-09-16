@@ -80,12 +80,20 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.2",
+            "0.2.3",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.2 (secondo Phase 25, seventh pin move; bumped "
-                + "from 0.2.0 by secondo phase 23 plan 23-09 at the sixth pin move, so "
-                + "that diagnose's version row can tell a build carrying the verified "
-                + "launcher write from one that does not). This "
+            "The engine's version is 0.2.3 (secondo Phase 25 GAP-CLOSURE correction, plan "
+                + "25-26; bumped from 0.2.2 because this build changes wire behaviour and "
+                + "diagnose's version row must be able to tell it from the build before it: "
+                + "ONE CANONICAL COORDINATE -- every indexed track method now resolves through "
+                + "TrackBankManager.getCanonicalTrack instead of subscripting the flat bank raw "
+                + "(25-REVIEW CR-03); the three ALIAS KEYS trackIndex, type and identityRequired "
+                + "are gone from every snapshot track row (WR-15); and a stalled device chain "
+                + "scan EXPIRES after CHAIN_SCAN_STALE_MS instead of latching listChain off for "
+                + "the session (WR-06). 0.2.2 was secondo Phase 25's seventh pin move, itself "
+                + "bumped from 0.2.0 by phase 23 plan 23-09 at the sixth pin move so that "
+                + "diagnose could tell a build carrying the verified launcher write from one "
+                + "that does not). This "
                 + "assertion is not redundant with the agreement test above: that one would stay "
                 + "green if BOTH copies were moved to a value nothing else in the project "
                 + "expects, and the version is compared across a repository boundary -- "

@@ -782,6 +782,159 @@ class DeviceHandlerTest {
         verifyNoInteractions(mockCursorTrack, mockCursorDevice);
     }
 
+    /**
+     * WR-06, the latch that never opened. A scan whose scheduled task never fires used to leave
+     * chainScanInProgress true for the rest of the session, so every later device/listChain threw
+     * DEVICE_CHAIN_SCAN_IN_PROGRESS with no deadline and no reset. Past CHAIN_SCAN_STALE_MS the
+     * next call must retire the stalled job and start a fresh scan with a NEW scanId.
+     *
+     * <p>The negative half is in the same test on purpose: within the ceiling the refusal must
+     * still happen, or the fix would have traded a latch for a free-for-all.</p>
+     */
+    @Test
+    void listChainReclaimsAStalledScanPastTheCeilingAndRefusesWithinIt() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        when(manager.canonicalBankSlot(0)).thenReturn(0);
+        DeviceBank bank = mock(DeviceBank.class);
+        when(bank.getSizeOfBank()).thenReturn(1);
+        doReturn(observedInteger(1)).when(bank).itemCount();
+        Device device = mock(Device.class);
+        warmDevice(device, "Polysynth", new String[0], false, false);
+        when(bank.getItemAt(0)).thenReturn(device);
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[0] = bank;
+
+        long[] now = {1_000L};
+        List<Runnable> neverRun = new ArrayList<>();
+        JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> neverRun.add(task), manager, flatSlotBanks, () -> now[0])
+            .register(chainDispatcher);
+
+        assertContains(chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}")),
+            "\"scanId\":1");
+
+        // Still inside the ceiling: the refusal stands.
+        now[0] += DeviceHandler.CHAIN_SCAN_STALE_MS - 1;
+        assertContains(chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}")),
+            "DEVICE_CHAIN_SCAN_IN_PROGRESS");
+
+        // Past it: the stalled scan is abandoned and a new one starts.
+        now[0] += 2;
+        assertContains(chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}")),
+            "\"scanId\":2");
+
+        // The abandoned job's late advance must not publish over the scan that replaced it.
+        neverRun.get(0).run();
+        assertContains(chainDispatcher.handle(rpc("device/getChainResult", "{\"scanId\":2}")),
+            "\"scanning\":true");
+
+        neverRun.get(1).run();
+        JsonObject result = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":2}")));
+        assertEquals(2, result.get("scanId").getAsInt(),
+            "the published result belongs to the scan that replaced the stalled one");
+        assertEquals(1, result.get("returnedCount").getAsInt());
+    }
+
+    /**
+     * WR-09: every observer the chain read registers is marked interested, matching the
+     * convention every other registration in this engine follows. The failure mode if a type
+     * ever needs it is silent -- every field comes back null with DEVICE_FIELD_UNOBSERVED, which
+     * reads as a cold cache rather than as a missing subscription.
+     */
+    @Test
+    void preparedChainBankMarksEveryObservedValueInterested() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        DeviceBank bank = mock(DeviceBank.class);
+        when(bank.getSizeOfBank()).thenReturn(1);
+        IntegerValue itemCount = observedInteger(1);
+        doReturn(itemCount).when(bank).itemCount();
+        Device device = mock(Device.class);
+        BooleanValue exists = observedBoolean(true);
+        SettableStringValue name = observedName("Polysynth");
+        BooleanValue plugin = observedBoolean(false);
+        SettableBooleanValue enabled = observedEnabled(true);
+        StringArrayValue slots = observedSlots();
+        BooleanValue layers = observedBoolean(false);
+        BooleanValue pads = observedBoolean(false);
+        doReturn(exists).when(device).exists();
+        doReturn(name).when(device).name();
+        doReturn(plugin).when(device).isPlugin();
+        doReturn(enabled).when(device).isEnabled();
+        doReturn(slots).when(device).slotNames();
+        doReturn(layers).when(device).hasLayers();
+        doReturn(pads).when(device).hasDrumPads();
+        when(bank.getItemAt(0)).thenReturn(device);
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[0] = bank;
+
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> task.run(), manager, flatSlotBanks)
+            .register(new JsonRpcDispatcher());
+
+        verify(itemCount).markInterested();
+        verify(exists).markInterested();
+        verify(name).markInterested();
+        verify(plugin).markInterested();
+        verify(enabled).markInterested();
+        verify(slots).markInterested();
+        verify(layers).markInterested();
+        verify(pads).markInterested();
+    }
+
+    /**
+     * IN-12, engine half. The engine skips a slot whose exists observed false while
+     * devicePosition stays the BANK SLOT, so the returned positions can have a gap. The harness
+     * cannot produce one and the Python validator never checked contiguity, so the contract
+     * "positions are bank slots, not ordinals" was untested in both directions. This is the
+     * engine half of that proof.
+     */
+    @Test
+    void listChainReturnsADevicePositionGapForASlotObservedNotExisting() {
+        TrackBankManager manager = mock(TrackBankManager.class);
+        when(manager.canonicalBankSlot(0)).thenReturn(0);
+        DeviceBank bank = mock(DeviceBank.class);
+        when(bank.getSizeOfBank()).thenReturn(4);
+        doReturn(observedInteger(4)).when(bank).itemCount();
+        for (int position = 0; position < 4; position++) {
+            Device device = mock(Device.class);
+            warmDevice(device, "Device " + position, new String[0], false, false);
+            if (position == 2) {
+                doReturn(observedBoolean(false)).when(device).exists();
+            }
+            when(bank.getItemAt(position)).thenReturn(device);
+        }
+        DeviceBank[] flatSlotBanks = new DeviceBank[16];
+        flatSlotBanks[0] = bank;
+
+        JsonRpcDispatcher chainDispatcher = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage,
+            mockDrumPadBank, mockDeviceLibrary, mockTransport, mockHost,
+            (task, delay) -> task.run(), manager, flatSlotBanks)
+            .register(chainDispatcher);
+
+        chainDispatcher.handle(rpc("device/listChain", "{\"trackIndex\":0}"));
+        JsonObject result = rpcResult(chainDispatcher.handle(
+            rpc("device/getChainResult", "{\"scanId\":1}")));
+
+        JsonArray nodes = result.getAsJsonArray("nodes");
+        assertEquals(3, nodes.size());
+        assertEquals(List.of(0, 1, 3), List.of(
+            nodes.get(0).getAsJsonObject().get("devicePosition").getAsInt(),
+            nodes.get(1).getAsJsonObject().get("devicePosition").getAsInt(),
+            nodes.get(2).getAsJsonObject().get("devicePosition").getAsInt()),
+            "positions are bank slots, not ordinals: slot 2 is skipped and 3 is kept");
+        assertEquals(3, result.getAsJsonArray("lastReturnedPath").get(0)
+            .getAsJsonObject().get("devicePosition").getAsInt());
+        assertEquals(3, result.get("topLevelReturnedCount").getAsInt());
+        assertEquals(4, result.get("topLevelDeviceCount").getAsInt());
+        assertFalse(result.toString().contains("DEVICE_FIELD_UNOBSERVED"),
+            "a slot observed NOT to exist is absent, not unobserved");
+    }
+
     private static JsonObject rpcResult(String response) {
         return com.google.gson.JsonParser.parseString(response).getAsJsonObject()
             .getAsJsonObject("result");

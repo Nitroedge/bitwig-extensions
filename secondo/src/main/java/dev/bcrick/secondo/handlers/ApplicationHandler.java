@@ -4,7 +4,6 @@ import com.bitwig.extension.controller.api.Action;
 import com.bitwig.extension.controller.api.ActionCategory;
 import com.bitwig.extension.controller.api.Application;
 import com.bitwig.extension.controller.api.ControllerHost;
-import com.bitwig.extension.controller.api.TrackBank;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
@@ -17,12 +16,13 @@ public class ApplicationHandler {
 
     private final Application application;
     private final ControllerHost host;
-    private final TrackBank trackBank;
+    private final TrackBankManager trackBankManager;
 
-    public ApplicationHandler(Application application, ControllerHost host, TrackBank trackBank) {
+    public ApplicationHandler(Application application, ControllerHost host,
+                              TrackBankManager trackBankManager) {
         this.application = application;
         this.host = host;
-        this.trackBank = trackBank;
+        this.trackBankManager = trackBankManager;
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -150,7 +150,9 @@ public class ApplicationHandler {
                 throw new IllegalArgumentException("missing 'trackIndex' parameter");
             }
             int trackIndex = params.get("trackIndex").getAsInt();
-            application.navigateIntoTrackGroup(trackBank.getItemAt(trackIndex));
+            // ONE COORDINATE (25-REVIEW CR-03). The number arriving here is the canonical
+            // public index the snapshot published, not a physical flat-bank slot.
+            application.navigateIntoTrackGroup(trackBankManager.getCanonicalTrack(trackIndex));
             return new JsonPrimitive("ok");
         });
 

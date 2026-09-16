@@ -84,6 +84,37 @@ class StateCacheSnapshotTest {
         assertEquals(sceneCountOf(StateCache.class), track0.getAsJsonArray("clips").size());
     }
 
+    /**
+     * WR-15: one key per fact. Each snapshot track row used to carry index AND trackIndex, type
+     * AND trackType, trackIdentityRequired AND identityRequired -- six declarations of three
+     * facts, on a snapshot Phase 25 made a read on EVERY indexed mutation, with nothing pinning
+     * the pairs equal. This pins the surviving key set so a re-added alias fails here.
+     *
+     * <p>uiNumber is NOT an alias and stays: it is the 1-based number the user sees.</p>
+     */
+    @Test
+    void snapshot_tracks_declareEachFactUnderExactlyOneKey() {
+        populateTrack(cache, 0);
+        JsonArray trackArr = cache.getSnapshot().getAsJsonObject("tracks")
+            .getAsJsonArray("tracks");
+        assertEquals(trackCountOf(StateCache.class), trackArr.size());
+
+        for (int i = 0; i < trackArr.size(); i++) {
+            JsonObject row = trackArr.get(i).getAsJsonObject();
+            assertTrue(row.has("index"), "row " + i + " must carry index");
+            assertTrue(row.has("trackType"), "row " + i + " must carry trackType");
+            assertTrue(row.has("trackIdentityRequired"),
+                "row " + i + " must carry trackIdentityRequired");
+            assertTrue(row.has("uiNumber"), "row " + i + " keeps uiNumber: a different fact");
+            assertFalse(row.has("trackIndex"),
+                "row " + i + " still carries the trackIndex alias of index");
+            assertFalse(row.has("type"),
+                "row " + i + " still carries the type alias of trackType");
+            assertFalse(row.has("identityRequired"),
+                "row " + i + " still carries the identityRequired alias of trackIdentityRequired");
+        }
+    }
+
     @Test
     void snapshot_scenes_containsSceneArray() {
         populateScene(cache, 0);

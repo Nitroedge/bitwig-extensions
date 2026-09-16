@@ -95,19 +95,22 @@ class HandlerRegistrationIntegrationTest {
         // must gain a line here AND a namespace test.
         DeviceLibrary deviceLibrary = new DeviceLibrary(tempDir);
 
-        new ApplicationHandler(mockApplication, mockHost, mockTrackBank).register(dispatcher);
-        new TransportHandler(mockTransport, stateCache).register(dispatcher);
+        // One manager for every indexed handler: CR-03's whole point is that the four handlers
+        // below resolve a public track index through the SAME resolver, so this mirror of
+        // SecondoExtension.init() hands them the same instance init() does.
         TrackBankManager trackBankManager = new TrackBankManager(mockTrackBank, 8);
+        new ApplicationHandler(mockApplication, mockHost, trackBankManager).register(dispatcher);
+        new TransportHandler(mockTransport, stateCache).register(dispatcher);
         new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack, trackBankManager, stateCache, mockNoteInput).register(dispatcher);
         new MasterHandler(mockMasterTrack).register(dispatcher);
-        new ClipHandler(mockTrackBank, mockSceneBank, mockCursorClip, stateCache).register(dispatcher);
+        new ClipHandler(trackBankManager, mockSceneBank, mockCursorClip, stateCache).register(dispatcher);
         new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage, mockDrumPadBank, deviceLibrary, mockTransport, mockHost, (task, delay) -> task.run()).register(dispatcher);
         new NoteHandler(mockCursorClip, stateCache).register(dispatcher);
         new ArrangerClipHandler(mockArrangerClip, stateCache).register(dispatcher);
         new SceneHandler(mockSceneBank, mockProject, stateCache).register(dispatcher);
         new ArrangerHandler(mockArranger, mockTransport, mockCueMarkerBank, mockScrollbar, stateCache).register(dispatcher);
         new MasterDeviceHandler(mockMasterTrack, mockMasterCursorDevice, mockMasterRemoteControlsPage, deviceLibrary, (task, delay) -> task.run()).register(dispatcher);
-        new SendHandler(mockTrackBank, 4).register(dispatcher);
+        new SendHandler(trackBankManager, 4).register(dispatcher);
         new ProjectHandler(mockProject, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);
         new BrowserHandler(mockPopupBrowser, mockCursorDevice, stateCache).register(dispatcher);

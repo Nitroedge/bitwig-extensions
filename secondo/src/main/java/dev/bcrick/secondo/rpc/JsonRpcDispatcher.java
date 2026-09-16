@@ -7,6 +7,49 @@ import java.util.*;
 public class JsonRpcDispatcher {
 
     private final Map<String, MethodHandler> handlers = new LinkedHashMap<>();
+
+    /**
+     * WHY THIS SERIALIZER EMITS NULLS, AND EXACTLY WHAT THAT REACHES (25-REVIEW WR-08).
+     * The flag is on the builder line at the bottom of this comment; it is named there once, and
+     * only there, so a grep for it lands on the code rather than on the prose about the code.
+     *
+     * <p>WHY. Decision D-25-15: the device read publishes a TOTAL schema, in which a field the
+     * engine could not observe is present with the value null rather than absent. Gson omits
+     * JsonNull members by default, which would have made "unobserved" and "not part of this
+     * shape" the same wire fact. Two readers in secondo's src/secondo/tools/device.py are
+     * written directly against that guarantee: :1903 tests "parentPath" not in raw_node, and
+     * :1940 builds its missing set from key absence. The flag is load-bearing, not incidental.
+     *
+     * <p>THE BLAST RADIUS, MEASURED rather than reasoned about. This one line changes the wire
+     * for every JsonNull.INSTANCE the engine has ever written, on all 328 registered methods,
+     * not only the Phase 25 ones. Measured at pin c906934 by
+     * grep -c "JsonNull.INSTANCE" over secondo/src/main/java: 25 sites in four files.
+     *
+     * <ul>
+     *   <li>12 in StateCache.java: trackBank itemCount and lastReturnedPath; a track row's
+     *       parentIndex, activated, effectiveActivated, position, legacyName and legacyPosition;
+     *       cursorTrackPosition and cursorSceneIndex; lastWriteClipRefusal; and the master row's
+     *       activated.</li>
+     *   <li>6 in DeviceHandler.java: the two cold-field helpers addString and addBoolean, a
+     *       top-level device's parentPath, slotNames, topLevelDeviceCount and
+     *       lastReturnedPath.</li>
+     *   <li>1 in TrackHandler.java: track/setActivated's cold observed activation.</li>
+     *   <li>6 in this file: the JSON-RPC 2.0 error-envelope ids below.</li>
+     * </ul>
+     *
+     * <p>7 of those 25 pre-date Phase 25, measured at pin 3b53206: lastWriteClipRefusal and the
+     * six envelope ids. 18 were introduced by Phase 25. One pre-existing site is GONE rather
+     * than changed: the master row's colour null was removed by Phase 25 and master colour is
+     * now always an object, which is why 3b53206 greps 8 and this pin greps 25 rather than 26.
+     *
+     * <p>THE READER RULE that follows from it. A Python reader tests value is None, NEVER key
+     * membership. The two device.py sites named above are the sole exception and were written
+     * for this flag deliberately. The six envelope ids are the JSON-RPC 2.0 id null the spec
+     * requires when a request could not be parsed enough to have an id: omitting them was a
+     * spec violation, and this flag is what made them correct. One further compensation exists
+     * and is deliberate: getArrangerClipState at StateCache.java uses if (field != null)
+     * addProperty(...) to keep genuinely absent arranger fields absent (its "F1" note).
+     */
     private final Gson gson = new GsonBuilder().serializeNulls().create();
 
     public void register(String method, MethodHandler handler) {
