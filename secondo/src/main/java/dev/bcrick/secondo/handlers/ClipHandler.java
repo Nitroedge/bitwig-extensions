@@ -16,6 +16,7 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 
@@ -352,18 +353,55 @@ public class ClipHandler {
     }
 
     /**
+     * A local drive-letter root as {@link Path#getRoot()} prints it on Windows: one letter, a
+     * colon and one backslash. Anything else (a UNC root, a device root) is not local.
+     */
+    private static final Pattern LOCAL_DRIVE_ROOT = Pattern.compile("[A-Za-z]:\\\\");
+
+    /** The clip file extension, and the shortest name that is not the extension alone. */
+    private static final String BWCLIP_EXTENSION = ".bwclip";
+
+    /** True when the first two characters are each a backslash or a forward slash. */
+    private static boolean startsWithTwoSeparators(String path) {
+        return path.length() >= 2 && isSeparator(path.charAt(0)) && isSeparator(path.charAt(1));
+    }
+
+    private static boolean isSeparator(char c) {
+        return c == '\\' || c == '/';
+    }
+
+    /**
      * D-26-22: the engine-side clip file checks, in the contract's order. Each failure is an
      * IllegalArgumentException (-32602) and insertFile is never reached.
      *
      * <ol>
      *   <li>not absolute: "clip file path is not absolute: "</li>
-     *   <li>starts with two backslashes or two forward slashes: "clip file path is a network path: "</li>
-     *   <li>lower-cased path does not end with ".bwclip": "clip file path does not end in .bwclip: "</li>
+     *   <li>not on a local drive-letter root: "clip file path is a network path: "</li>
+     *   <li>final component does not end in ".bwclip" (any case) or is only the extension:
+     *       "clip file path does not end in .bwclip: "</li>
      *   <li>not a regular file: "clip file path is not an existing file: "</li>
      * </ol>
      *
-     * A path the platform cannot parse at all (InvalidPathException) cannot be proven absolute
-     * or existing; it skips the absoluteness check and ends at the last message.
+     * <p>CR-01: the network test reads the parsed root, not a string prefix. Windows parses ANY
+     * two leading separators, in any mix of backslash and forward slash, as a UNC root, so the
+     * original two-literal prefix test let a backslash-then-slash or slash-then-backslash UNC
+     * spelling through to {@link Files#isRegularFile}, which is an outbound SMB request on
+     * Bitwig's control-surface thread (T-26-01). A string prefix was never the right test. The
+     * device-prefixed spellings (backslash-backslash-question-mark, backslash-backslash-dot) may
+     * not parse at all, so they are refused by the two-separator rule whether or not
+     * {@link Path#of} accepts them; a device path to a local drive is refused too. The rule and
+     * the order are the ones src/secondo/tools/browse.py and mock/state.py use (IN-02: a name is
+     * longer than the extension alone). Every check before the existence check is a pure string
+     * parse that touches nothing on disk or on the network.
+     *
+     * <p>A path the platform cannot parse at all (InvalidPathException) cannot be proven absolute
+     * or existing; it skips the absoluteness check and ends at the last message unless an
+     * earlier rule refuses it.
+     *
+     * <p>Accepted residual (owner answer (ii), 2026-09-16, T-26-64): the existence check still
+     * runs on the control-surface thread for a local drive-letter root, so a mapped network drive
+     * letter whose share is offline can stall the extension until Windows times the connection
+     * out; moving the check off that thread needs Phase 29's deferrable responses.
      */
     private static void validateClipFilePath(String path) {
         Path parsed;
@@ -375,10 +413,12 @@ public class ClipHandler {
         if (parsed != null && !parsed.isAbsolute()) {
             throw new IllegalArgumentException("clip file path is not absolute: " + path);
         }
-        if (path.startsWith("\\\\") || path.startsWith("//")) {
+        if (startsWithTwoSeparators(path)
+                || (parsed != null && (parsed.getRoot() == null
+                    || !LOCAL_DRIVE_ROOT.matcher(parsed.getRoot().toString()).matches()))) {
             throw new IllegalArgumentException("clip file path is a network path: " + path);
         }
-        if (!path.toLowerCase(Locale.ROOT).endsWith(".bwclip")) {
+        if (!isBwclipName(finalComponent(path, parsed))) {
             throw new IllegalArgumentException("clip file path does not end in .bwclip: " + path);
         }
         if (parsed == null || !Files.isRegularFile(parsed)) {
@@ -386,7 +426,21 @@ public class ClipHandler {
         }
     }
 
+    /** The final component: the parsed file name, else the raw text after the last separator. */
+    private static String finalComponent(String path, Path parsed) {
+        if (parsed != null) {
+            Path name = parsed.getFileName();
+            return name == null ? "" : name.toString();
+        }
+        int last = Math.max(path.lastIndexOf('\\'),path.lastIndexOf('/'));
+        return path.substring(last + 1);
+    }
 
+    /** IN-02: ends in ".bwclip" in any case and is longer than the extension alone. */
+    private static boolean isBwclipName(String name) {
+        return name.toLowerCase(Locale.ROOT).endsWith(BWCLIP_EXTENSION)
+            && name.length() > BWCLIP_EXTENSION.length();
+    }
 
     private void validateColorComponent(float value, String name) {
         if (value < 0.0f || value > 1.0f) {

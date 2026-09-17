@@ -80,9 +80,15 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.4",
+            "0.2.5",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.4 (secondo Phase 26 browser build, plan 26-06; bumped "
+            "The engine's version is 0.2.5 (secondo Phase 26 CR-01 correction, plan 26-15; bumped "
+                + "from 0.2.4 by the owner's option-a decision because this build changes wire "
+                + "behaviour and diagnose's version row must be able to tell it from the build "
+                + "before it: clip/insertFile now refuses every UNC and device spelling by its "
+                + "parsed root, including the mixed-separator spellings 0.2.4 let through to the "
+                + "existence check, and refuses a file named only .bwclip. 0.2.4 was the Phase 26 "
+                + "browser build, plan 26-06; bumped "
                 + "from 0.2.3 because this build changes wire behaviour and diagnose's version "
                 + "row must be able to tell it from the build before it: FOUR NEW METHODS -- "
                 + "clip/insertFile, clip/browseToInsert, browser/browseMasterInsertDevice and "

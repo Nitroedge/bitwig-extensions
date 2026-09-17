@@ -619,6 +619,60 @@ class ClipHandlerTest {
             "clip file path is a network path: ");
     }
 
+    // --- CR-01 engine half (plan 26-15): Windows parses ANY two leading separators, in any mix,
+    // as a UNC root, so the network test reads the parsed root, not a string prefix. The cases
+    // mirror plan 26-12's CLIP_FILE_PATH_CASES on the Python and harness sides. ---
+
+    @Test
+    void clipInsertFile_backslashThenSlashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\/srv/share/fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_slashThenBackslashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("/\\srv\\share\\fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_questionMarkUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\UNC\\srv\\s\\fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_dotUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\.\\UNC\\srv\\s\\fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_questionMarkLocalDevicePath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\C:\\clips\\fixture.bwclip", 0,
+            "clip file path is a network path: ");
+    }
+
+    @Test
+    void clipInsertFile_fileNamedOnlyTheExtension_refusedForItsExtension() throws IOException {
+        Path onlyExtension = Files.writeString(clipDir.resolve(".bwclip"), "x");
+        assertInsertFileRefused(onlyExtension.toString(), 0,
+            "clip file path does not end in .bwclip: ");
+    }
+
+    @Test
+    void clipInsertFile_forwardSlashDrivePath_insertsAtTheCanonicalSlot() throws IOException {
+        Path clip = Files.writeString(clipDir.resolve("forward.bwclip"), "x");
+        String forwardSlashPath = clip.toString().replace('\\', '/');
+        when(mockSlot.replaceInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        String response = dispatcher.handle(rpc("clip/insertFile",
+            "{\"trackIndex\":0,\"slotIndex\":0,\"path\":" + jsonString(forwardSlashPath) + "}"));
+
+        assertContains(response, "\"ok\"");
+        verify(mockInsertionPoint).insertFile(forwardSlashPath);
+    }
+
     @Test
     void clipInsertFile_midPath_refusedForItsExtension() throws IOException {
         Path mid = Files.writeString(clipDir.resolve("fixture.mid"), "x");

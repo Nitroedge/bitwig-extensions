@@ -1240,8 +1240,13 @@ Calling it again after an unconfirmed load can duplicate or replace content; rea
 Errors (`-32602`), checked in this order, all before `insertFile` is called:
 
 - `clip file path is not absolute: <path>`
-- `clip file path is a network path: <path>` (starts with two backslashes or two forward slashes)
-- `clip file path does not end in .bwclip: <path>` (case-insensitive)
+- `clip file path is a network path: <path>` (the path starts with any two separators, in any mix
+  of backslash and forward slash, or its parsed root is not a local drive-letter root such as
+  `C:\`; this refuses every UNC spelling, the `\\?\` and `\\.\` device prefixes, and a device
+  path to a local drive, without touching the filesystem)
+- `clip file path does not end in .bwclip: <path>` (the final path component must end in
+  `.bwclip`, case-insensitively, and be longer than the extension alone, so a file named only
+  `.bwclip` is refused)
 - `clip file path is not an existing file: <path>` (also for a path the platform cannot parse)
 - `slot index out of range: <slotIndex>`
 
