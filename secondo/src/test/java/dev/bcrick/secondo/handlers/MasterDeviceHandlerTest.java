@@ -75,7 +75,69 @@ class MasterDeviceHandlerTest {
         assertTrue(methods.contains("masterDevice/selectPageByTag"));
         assertTrue(methods.contains("masterDevice/setParameterMapping"));
         assertTrue(methods.contains("masterDevice/getParameterMapping"));
-        assertEquals(24, methods.size());
+        assertTrue(methods.contains("masterDevice/getRemoteControlPages"));
+        assertTrue(methods.contains("masterDevice/setRemoteControlValues"));
+        assertTrue(methods.contains("masterDevice/getPanelParameters"));
+        assertTrue(methods.contains("masterDevice/setPanelParameter"));
+        // 24 before Phase 27, plus the four remote-control page and panel parameter routes.
+        assertEquals(28, methods.size());
+    }
+
+    // --- Phase 27: parked remote-control pages and panel parameters ---
+
+    @Test
+    void phase27Routes_throughTheLegacyOverloadAnswerUnavailableRatherThanANullDereference() {
+        String pages = dispatcher.handle(rpc("masterDevice/getRemoteControlPages", "{}"));
+        assertContains(pages, "-32603");
+        assertContains(pages, "REMOTE_CONTROLS_UNAVAILABLE");
+        String write = dispatcher.handle(rpc("masterDevice/setRemoteControlValues",
+            "{\"pages\":[{\"pageIndex\":0,\"params\":[{\"index\":0,\"value\":0.5}]}]}"));
+        assertContains(write, "REMOTE_CONTROLS_UNAVAILABLE");
+        String panel = dispatcher.handle(rpc("masterDevice/getPanelParameters", "{}"));
+        assertContains(panel, "-32603");
+        assertContains(panel, "PANEL_PARAMETERS_UNAVAILABLE");
+        String set = dispatcher.handle(rpc("masterDevice/setPanelParameter",
+            "{\"id\":\"a\",\"value\":0.5}"));
+        assertContains(set, "PANEL_PARAMETERS_UNAVAILABLE");
+    }
+
+    @Test
+    void phase27Routes_delegateToTheMasterHelpers() {
+        CursorDevice device = mock(CursorDevice.class, RETURNS_DEEP_STUBS);
+        com.bitwig.extension.callback.StringArrayValueChangedCallback[] idCallback =
+            new com.bitwig.extension.callback.StringArrayValueChangedCallback[1];
+        doAnswer(inv -> {
+            idCallback[0] = inv.getArgument(0);
+            return null;
+        }).when(device).addDirectParameterIdObserver(any());
+        ParkedRemoteControls parked = ParkedRemoteControls.create(
+            device, "secondo-master-page-", (task, delay) -> task.run());
+        DirectParameters direct = DirectParameters.attach(device);
+        JsonRpcDispatcher wired = new JsonRpcDispatcher();
+        new MasterDeviceHandler(mockMasterTrack, device, mockRemoteControlsPage, mockDeviceLibrary,
+            (task, delay) -> task.run(), parked, direct).register(wired);
+
+        for (int p = 0; p < 8; p++) {
+            verify(device).createCursorRemoteControlsPage("secondo-master-page-" + p, 8, "");
+        }
+        String pages = wired.handle(rpc("masterDevice/getRemoteControlPages", "{}"));
+        assertContains(pages, "\"cursorCount\":8");
+        String write = wired.handle(rpc("masterDevice/setRemoteControlValues",
+            "{\"pages\":[{\"pageIndex\":0,\"params\":[{\"index\":0,\"value\":0.5}]}]}"));
+        assertContains(write, "REMOTE_PAGE_OUT_OF_REACH: page 0");
+        String panel = wired.handle(rpc("masterDevice/getPanelParameters", "{}"));
+        assertContains(panel, "PANEL_IDS_UNOBSERVED");
+
+        idCallback[0].valueChanged(new String[] {"a"});
+        String unknown = wired.handle(rpc("masterDevice/setPanelParameter",
+            "{\"id\":\"b\",\"value\":0.5}"));
+        assertContains(unknown, "-32602");
+        assertContains(unknown, "PANEL_PARAMETER_ID_UNKNOWN: b");
+        verify(device, never()).setDirectParameterValueNormalized(any(), any(), any());
+        String set = wired.handle(rpc("masterDevice/setPanelParameter",
+            "{\"id\":\"a\",\"value\":1.0}"));
+        assertContains(set, "\"ok\":true");
+        verify(device).setDirectParameterValueNormalized(eq("a"), any(), any());
     }
 
     // --- setEnabled validation ---

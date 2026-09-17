@@ -13,6 +13,7 @@ import dev.bcrick.secondo.handlers.BrowserHandler;
 import dev.bcrick.secondo.handlers.ClipHandler;
 import dev.bcrick.secondo.handlers.DetailEditorHandler;
 import dev.bcrick.secondo.handlers.DeviceHandler;
+import dev.bcrick.secondo.handlers.DirectParameters;
 import dev.bcrick.secondo.handlers.DeviceLibrary;
 import dev.bcrick.secondo.handlers.GrooveHandler;
 import dev.bcrick.secondo.handlers.MacroHandler;
@@ -21,6 +22,7 @@ import dev.bcrick.secondo.handlers.MasterDeviceHandler;
 import dev.bcrick.secondo.handlers.MasterHandler;
 import dev.bcrick.secondo.handlers.NoteHandler;
 import dev.bcrick.secondo.handlers.NoteInputHandler;
+import dev.bcrick.secondo.handlers.ParkedRemoteControls;
 import dev.bcrick.secondo.handlers.ProjectHandler;
 import dev.bcrick.secondo.handlers.SceneHandler;
 import dev.bcrick.secondo.handlers.SendHandler;
@@ -102,6 +104,16 @@ public class SecondoExtension extends ControllerExtension {
         CursorDevice cursorDevice = cursorTrack.createCursorDevice("gig-device", "Gig Device", 0,
             CursorDeviceFollowMode.FOLLOW_SELECTION);
         CursorRemoteControlsPage remoteControlsPage = cursorDevice.createCursorRemoteControlsPage(8);
+        // Parked remote-control pages and direct (panel) parameters (Phase 27): created here
+        // because Bitwig permits proxy factories and observers only during initialization
+        // (D-25-20). Eight page cursors parked one per page index on this cursor device, no bank
+        // slots (D-27-01, N = 8 per D-27-02), and the Device direct-parameter members rather than
+        // the Specific device factories (D-27-17). The one-argument cursor above is kept: it
+        // feeds session/snapshot's user-selected page and the still-registered device/discoverAll
+        // pair (D-27-05).
+        ParkedRemoteControls trackParked =
+            ParkedRemoteControls.create(cursorDevice, "secondo-track-page-", host::scheduleTask);
+        DirectParameters trackDirect = DirectParameters.attach(cursorDevice);
 
         // Create drum pad bank for reading drum pad names (128 = full MIDI range)
         com.bitwig.extension.controller.api.DrumPadBank drumPadBank = cursorDevice.createDrumPadBank(128);
@@ -115,6 +127,11 @@ public class SecondoExtension extends ControllerExtension {
         // Create master cursor device for master bus FX
         CursorDevice masterCursorDevice = masterTrack.createCursorDevice("gig-master-device", 0);
         CursorRemoteControlsPage masterRemoteControlsPage = masterCursorDevice.createCursorRemoteControlsPage(8);
+        // The master twin of the parked pages and direct parameters above (Phase 27, D-27-01,
+        // D-27-02, D-27-17; init only per D-25-20; the one-argument cursor kept per D-27-05).
+        ParkedRemoteControls masterParked = ParkedRemoteControls.create(
+            masterCursorDevice, "secondo-master-page-", host::scheduleTask);
+        DirectParameters masterDirect = DirectParameters.attach(masterCursorDevice);
 
         // Master chain bank (Phase 26, D-26-20): created here because Bitwig permits proxy
         // factories only during initialization (D-25-20); read through session/snapshot masterChain.
@@ -226,12 +243,13 @@ public class SecondoExtension extends ControllerExtension {
         DeviceLibrary deviceLibrary = resolveDeviceLibrary();
         new DeviceHandler(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank,
             deviceLibrary, transport, host, host::scheduleTask, trackBankManager,
-            canonicalDeviceBanks).register(dispatcher);
+            canonicalDeviceBanks, trackParked, trackDirect).register(dispatcher);
         new NoteHandler(cursorClip, stateCache).register(dispatcher);
         new ArrangerClipHandler(arrangerClip, stateCache).register(dispatcher);
         new SceneHandler(trackBank.sceneBank(), project, stateCache).register(dispatcher);
         new ArrangerHandler(arranger, transport, cueMarkerBank, arranger.getHorizontalScrollbarModel(), stateCache).register(dispatcher);
-        new MasterDeviceHandler(masterTrack, masterCursorDevice, masterRemoteControlsPage, deviceLibrary, host::scheduleTask).register(dispatcher);
+        new MasterDeviceHandler(masterTrack, masterCursorDevice, masterRemoteControlsPage, deviceLibrary, host::scheduleTask,
+            masterParked, masterDirect).register(dispatcher);
         new SendHandler(trackBankManager, SEND_COUNT).register(dispatcher);
         new ProjectHandler(project, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);

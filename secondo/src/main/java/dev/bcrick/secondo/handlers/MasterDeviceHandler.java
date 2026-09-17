@@ -26,15 +26,31 @@ public class MasterDeviceHandler {
     private final CursorRemoteControlsPage remoteControlsPage;
     private final DeviceLibrary deviceLibrary;
     private final TaskScheduler scheduler;
+    // Phase 27: the master cursor device's parked remote-control pages and direct (panel)
+    // parameters, created in SecondoExtension.init() (D-25-20). Null only through the legacy
+    // overload, where the four Phase 27 routes answer *_UNAVAILABLE.
+    private final ParkedRemoteControls parkedRemoteControls;
+    private final DirectParameters directParameters;
 
     public MasterDeviceHandler(MasterTrack masterTrack, CursorDevice cursorDevice,
                                 CursorRemoteControlsPage remoteControlsPage,
                                 DeviceLibrary deviceLibrary, TaskScheduler scheduler) {
+        this(masterTrack, cursorDevice, remoteControlsPage, deviceLibrary, scheduler, null, null);
+    }
+
+    /** The overload SecondoExtension.init() uses from Phase 27 (D-27-01, D-27-17). */
+    public MasterDeviceHandler(MasterTrack masterTrack, CursorDevice cursorDevice,
+                                CursorRemoteControlsPage remoteControlsPage,
+                                DeviceLibrary deviceLibrary, TaskScheduler scheduler,
+                                ParkedRemoteControls parkedRemoteControls,
+                                DirectParameters directParameters) {
         this.masterTrack = masterTrack;
         this.cursorDevice = cursorDevice;
         this.remoteControlsPage = remoteControlsPage;
         this.deviceLibrary = deviceLibrary;
         this.scheduler = scheduler;
+        this.parkedRemoteControls = parkedRemoteControls;
+        this.directParameters = directParameters;
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -277,6 +293,23 @@ public class MasterDeviceHandler {
             return result;
         });
 
+        // --- Phase 27: parked remote-control pages and panel (direct) parameters ---
+        // The master twin of DeviceHandler's four routes, on the master cursor device's own
+        // helpers, so the track and master contracts cannot drift apart. One-line delegations;
+        // no proxy factory in any lambda (D-25-20). An ok is never proof: the tool verifies by
+        // the page or panel read.
+        dispatcher.register("masterDevice/getRemoteControlPages", params ->
+            parked().readPages());
+
+        dispatcher.register("masterDevice/setRemoteControlValues", params ->
+            parked().writeValues(requireArray(params, "pages")));
+
+        dispatcher.register("masterDevice/getPanelParameters", params ->
+            direct().read());
+
+        dispatcher.register("masterDevice/setPanelParameter", params ->
+            direct().write(DirectParameters.panelId(params), DirectParameters.panelValue(params)));
+
         // --- Remote control mapping ---
 
         dispatcher.register("masterDevice/setParameterMapping", params -> {
@@ -296,6 +329,20 @@ public class MasterDeviceHandler {
             }
             return result;
         });
+    }
+
+    private ParkedRemoteControls parked() {
+        if (parkedRemoteControls == null) {
+            throw new IllegalStateException("REMOTE_CONTROLS_UNAVAILABLE");
+        }
+        return parkedRemoteControls;
+    }
+
+    private DirectParameters direct() {
+        if (directParameters == null) {
+            throw new IllegalStateException("PANEL_PARAMETERS_UNAVAILABLE");
+        }
+        return directParameters;
     }
 
     private InsertionPoint getInsertionPoint(String position) {

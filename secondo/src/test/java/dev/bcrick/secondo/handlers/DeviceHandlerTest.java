@@ -129,8 +129,90 @@ class DeviceHandlerTest {
     }
 
     @Test
-    void registersExactlyThirtySixMethods() {
-        assertEquals(36, dispatcher.getRegisteredMethods().size());
+    void registersExactlyFortyMethods() {
+        // 36 before Phase 27, plus the four remote-control page and panel parameter routes.
+        assertEquals(40, dispatcher.getRegisteredMethods().size());
+    }
+
+    // --- Phase 27: parked remote-control pages and panel parameters ---
+
+    @Test
+    void registersThePhase27RemoteControlAndPanelMethods() {
+        var methods = dispatcher.getRegisteredMethods();
+        assertTrue(methods.contains("device/getRemoteControlPages"));
+        assertTrue(methods.contains("device/setRemoteControlValues"));
+        assertTrue(methods.contains("device/getPanelParameters"));
+        assertTrue(methods.contains("device/setPanelParameter"));
+        // D-27-05: the discovery pair stays registered beside them.
+        assertTrue(methods.contains("device/discoverAll"));
+        assertTrue(methods.contains("device/getDiscoveryResult"));
+    }
+
+    @Test
+    void phase27Routes_throughALegacyOverloadAnswerUnavailableRatherThanANullDereference() {
+        String pages = dispatcher.handle(rpc("device/getRemoteControlPages", "{}"));
+        assertContains(pages, "-32603");
+        assertContains(pages, "REMOTE_CONTROLS_UNAVAILABLE");
+        String write = dispatcher.handle(rpc("device/setRemoteControlValues",
+            "{\"pages\":[{\"pageIndex\":0,\"params\":[{\"index\":0,\"value\":0.5}]}]}"));
+        assertContains(write, "REMOTE_CONTROLS_UNAVAILABLE");
+        String panel = dispatcher.handle(rpc("device/getPanelParameters", "{}"));
+        assertContains(panel, "-32603");
+        assertContains(panel, "PANEL_PARAMETERS_UNAVAILABLE");
+        String set = dispatcher.handle(rpc("device/setPanelParameter",
+            "{\"id\":\"a\",\"value\":0.5}"));
+        assertContains(set, "PANEL_PARAMETERS_UNAVAILABLE");
+        assertFalse(pages.contains("NullPointerException"));
+    }
+
+    @Test
+    void phase27Routes_delegateToTheParkedAndDirectHelpers() {
+        CursorDevice device = mock(CursorDevice.class, RETURNS_DEEP_STUBS);
+        com.bitwig.extension.callback.StringArrayValueChangedCallback[] idCallback =
+            new com.bitwig.extension.callback.StringArrayValueChangedCallback[1];
+        doAnswer(inv -> {
+            idCallback[0] = inv.getArgument(0);
+            return null;
+        }).when(device).addDirectParameterIdObserver(any());
+        ParkedRemoteControls parked =
+            ParkedRemoteControls.create(device, "secondo-track-page-", (task, delay) -> task.run());
+        DirectParameters direct = DirectParameters.attach(device);
+        JsonRpcDispatcher wired = new JsonRpcDispatcher();
+        new DeviceHandler(mockCursorTrack, device, mockRemoteControlsPage, mockDrumPadBank,
+            mockDeviceLibrary, mockTransport, mockHost, (task, delay) -> task.run(),
+            null, null, parked, direct).register(wired);
+
+        // readPages: no page count has been observed on the deep-stub cursors.
+        String pages = wired.handle(rpc("device/getRemoteControlPages", "{}"));
+        assertContains(pages, "\"cursorCount\":8");
+        assertContains(pages, "\"pageCount\":null");
+        assertContains(pages, "REMOTE_FIELD_UNOBSERVED");
+
+        // writeValues: requireArray first, then the helper's reach check.
+        assertContains(wired.handle(rpc("device/setRemoteControlValues", "{}")),
+            "Missing required param: pages");
+        String write = wired.handle(rpc("device/setRemoteControlValues",
+            "{\"pages\":[{\"pageIndex\":0,\"params\":[{\"index\":0,\"value\":0.5}]}]}"));
+        assertContains(write, "-32602");
+        assertContains(write, "REMOTE_PAGE_OUT_OF_REACH: page 0");
+
+        // read and write on the direct helper.
+        String panel = wired.handle(rpc("device/getPanelParameters", "{}"));
+        assertContains(panel, "\"idsObserved\":false");
+        assertContains(panel, "PANEL_IDS_UNOBSERVED");
+        String unobserved = wired.handle(rpc("device/setPanelParameter",
+            "{\"id\":\"a\",\"value\":0.5}"));
+        assertContains(unobserved, "-32603");
+        assertContains(unobserved, "PANEL_IDS_UNOBSERVED");
+        assertContains(wired.handle(rpc("device/setPanelParameter", "{\"value\":0.5}")),
+            "panel parameter id must be a non-empty string");
+
+        idCallback[0].valueChanged(new String[] {"a"});
+        String set = wired.handle(rpc("device/setPanelParameter",
+            "{\"id\":\"a\",\"value\":0.5}"));
+        assertContains(set, "\"ok\":true");
+        assertContains(set, "\"generation\":1");
+        verify(device).setDirectParameterValueNormalized(eq("a"), any(), any());
     }
 
     // --- device/hasAutomation validation ---

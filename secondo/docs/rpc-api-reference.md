@@ -1877,6 +1877,60 @@ Retrieve discovery scan results. Returns full parameter map or preset-format JSO
 |-----------|------|----------|-------------|
 | `format` | string | no | `"full"` (default) or `"preset"` |
 
+### `device/getRemoteControlPages`
+
+Read up to eight remote-control pages of the track cursor device at once, from eight page cursors parked one per page index at extension start (Phase 27). A pure cache read: the page the user is looking at never moves. Returns `{deviceExists, deviceName, pageCount, pageNames, cursorCount: 8, pages, warnings}`, where `pages` has one entry per index below `min(pageCount, 8)`, each `{index, name, parked, parameters}`, and `parameters` is eight `{index, name, value, displayedValue}` objects when `parked` is true and `null` when it is false. Every value not yet observed is `null`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
+Warnings (`{code, message, pages?, field?}`):
+- `REMOTE_PAGE_NOT_PARKED` — the named pages' cursors had not settled on their own page; their `parameters` are `null` (never another page's values) and a zero-delay re-park was scheduled. Read again.
+- `REMOTE_PAGES_BEYOND_CURSORS` — pages 8 and above exist and no parked cursor reaches them.
+- `REMOTE_FIELD_UNOBSERVED` — `field` (`pageCount`, `pageNames`, `name`, `value` or `displayedValue`) is not observed yet on the named pages. An unobserved `pageCount` publishes no pages.
+
+Effect: none beyond scheduling re-parks. A re-park moves only a parked cursor, never the user-following one.
+
+### `device/setRemoteControlValues`
+
+Write remote-control values on one or more pages of the track cursor device, synchronously, each on its own page's parked cursor. Returns `{ok: true, pageCount, paramCount}`. An `ok` means accepted for dispatch; verify by `device/getRemoteControlPages`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pages` | array | yes | Array of `{pageIndex, params: [{index, value}]}` objects; `index` 0-7, `value` 0.0 to 1.0 |
+
+Every check runs before any write, in this order:
+1. The payload shape, with `device/setParameters`' messages (-32602).
+2. `REMOTE_PAGE_OUT_OF_REACH: page N` (-32602) — the page count is unobserved, or `pageIndex` is negative or at or past `min(pageCount, 8)`.
+3. `REMOTE_PAGE_NOT_PARKED: page N` (-32603) — that page's cursor has drifted; a re-park is scheduled and nothing is written. Read the pages, then retry.
+
+Returns `REMOTE_CONTROLS_UNAVAILABLE` (-32603) only when the handler was built without the parked cursors.
+
+### `device/getPanelParameters`
+
+Read every direct (panel) parameter the track cursor device exposes, by string id, from observer caches registered at extension start. Never moves any cursor. Returns `{deviceExists, deviceName, isPlugin, generation, idsObserved, parameterCount, parameters, warnings}`; `parameters` is `[{id, name, displayValue, normalizedValue}]` in the id set's order, and a value Bitwig reports as not accessible (NaN) is `null`. `generation` increases each time the id set changes, which is what a device change looks like.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
+Warnings (`{code, message, field?, count?}`):
+- `PANEL_IDS_UNOBSERVED` — the id set has not been observed yet; `idsObserved` is `false` and `parameterCount` is `null`.
+- `PANEL_NO_DIRECT_PARAMETERS` — the id set was observed and is empty.
+- `PANEL_FIELD_UNOBSERVED` — `field` (`name`, `displayValue` or `normalizedValue`) is `null` for `count` ids.
+
+### `device/setPanelParameter`
+
+Set one direct (panel) parameter of the track cursor device by id. Returns `{ok: true, generation}`. An `ok` means accepted for dispatch; verify by `device/getPanelParameters` and compare `generation`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | A direct-parameter id from the current id set |
+| `value` | number | yes | Normalized value (0.0 to 1.0) |
+
+Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value out of range: 0.0-1.0, got V` (-32602); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
+
 ### `device/setParameterMapping`
 
 Toggle mapping mode for a remote control parameter slot.
@@ -2091,6 +2145,60 @@ Jump to a parameter page by tag on the master device.
 | `tag` | string | yes | `"env"`, `"eq"`, `"filter"`, `"fx"`, `"lfo"`, `"mixer"`, `"osc"`, `"perf"` |
 | `direction` | string | no | `"next"` or `"previous"` |
 | `cycle` | boolean | no | Wrap around (default `true`) |
+
+### `masterDevice/getRemoteControlPages`
+
+Read up to eight remote-control pages of the master cursor device at once, from eight page cursors parked one per page index at extension start (Phase 27). A pure cache read: the page the user is looking at never moves. Returns `{deviceExists, deviceName, pageCount, pageNames, cursorCount: 8, pages, warnings}`, where `pages` has one entry per index below `min(pageCount, 8)`, each `{index, name, parked, parameters}`, and `parameters` is eight `{index, name, value, displayedValue}` objects when `parked` is true and `null` when it is false. Every value not yet observed is `null`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
+Warnings (`{code, message, pages?, field?}`):
+- `REMOTE_PAGE_NOT_PARKED` — the named pages' cursors had not settled on their own page; their `parameters` are `null` (never another page's values) and a zero-delay re-park was scheduled. Read again.
+- `REMOTE_PAGES_BEYOND_CURSORS` — pages 8 and above exist and no parked cursor reaches them.
+- `REMOTE_FIELD_UNOBSERVED` — `field` (`pageCount`, `pageNames`, `name`, `value` or `displayedValue`) is not observed yet on the named pages. An unobserved `pageCount` publishes no pages.
+
+Effect: none beyond scheduling re-parks. A re-park moves only a parked cursor, never the user-following one.
+
+### `masterDevice/setRemoteControlValues`
+
+Write remote-control values on one or more pages of the master cursor device, synchronously, each on its own page's parked cursor. Returns `{ok: true, pageCount, paramCount}`. An `ok` means accepted for dispatch; verify by `masterDevice/getRemoteControlPages`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pages` | array | yes | Array of `{pageIndex, params: [{index, value}]}` objects; `index` 0-7, `value` 0.0 to 1.0 |
+
+Every check runs before any write, in this order:
+1. The payload shape, with `masterDevice/setParameters`' messages (-32602).
+2. `REMOTE_PAGE_OUT_OF_REACH: page N` (-32602) — the page count is unobserved, or `pageIndex` is negative or at or past `min(pageCount, 8)`.
+3. `REMOTE_PAGE_NOT_PARKED: page N` (-32603) — that page's cursor has drifted; a re-park is scheduled and nothing is written. Read the pages, then retry.
+
+Returns `REMOTE_CONTROLS_UNAVAILABLE` (-32603) only when the handler was built without the parked cursors.
+
+### `masterDevice/getPanelParameters`
+
+Read every direct (panel) parameter the master cursor device exposes, by string id, from observer caches registered at extension start. Never moves any cursor. Returns `{deviceExists, deviceName, isPlugin, generation, idsObserved, parameterCount, parameters, warnings}`; `parameters` is `[{id, name, displayValue, normalizedValue}]` in the id set's order, and a value Bitwig reports as not accessible (NaN) is `null`. `generation` increases each time the id set changes, which is what a device change looks like.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| *(none)* | | | |
+
+Warnings (`{code, message, field?, count?}`):
+- `PANEL_IDS_UNOBSERVED` — the id set has not been observed yet; `idsObserved` is `false` and `parameterCount` is `null`.
+- `PANEL_NO_DIRECT_PARAMETERS` — the id set was observed and is empty.
+- `PANEL_FIELD_UNOBSERVED` — `field` (`name`, `displayValue` or `normalizedValue`) is `null` for `count` ids.
+
+### `masterDevice/setPanelParameter`
+
+Set one direct (panel) parameter of the master cursor device by id. Returns `{ok: true, generation}`. An `ok` means accepted for dispatch; verify by `masterDevice/getPanelParameters` and compare `generation`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `id` | string | yes | A direct-parameter id from the current id set |
+| `value` | number | yes | Normalized value (0.0 to 1.0) |
+
+Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value out of range: 0.0-1.0, got V` (-32602); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
 
 ### `masterDevice/setParameterMapping`
 

@@ -68,6 +68,11 @@ public class DeviceHandler {
     // PARAM_COUNT above, and src/secondo/models.py cites that declaration BY LINE NUMBER
     // (tests/test_conformance.py asserts the cited line still carries it).
     private final java.util.function.LongSupplier clock;
+    // Phase 27: the parked remote-control pages and the direct (panel) parameters of this
+    // handler's cursor device, created in SecondoExtension.init() (D-25-20). Null only through a
+    // legacy constructor overload, where the four Phase 27 routes answer *_UNAVAILABLE.
+    private final ParkedRemoteControls parkedRemoteControls;
+    private final DirectParameters directParameters;
     private volatile boolean chainScanInProgress = false;
     private volatile JsonObject chainScanResult = null;
     private volatile int chainScanId = 0;
@@ -103,8 +108,24 @@ public class DeviceHandler {
                          TaskScheduler scheduler, TrackBankManager trackBankManager,
                          DeviceBank[] canonicalDeviceBanks) {
         this(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary,
+            transport, host, scheduler, trackBankManager, canonicalDeviceBanks, null, null);
+    }
+
+    /**
+     * The overload SecondoExtension.init() uses from Phase 27: the parked remote-control pages
+     * and the direct parameters of the track cursor device (D-27-01, D-27-17).
+     */
+    public DeviceHandler(CursorTrack cursorTrack, CursorDevice cursorDevice,
+                         CursorRemoteControlsPage remoteControlsPage,
+                         DrumPadBank drumPadBank, DeviceLibrary deviceLibrary,
+                         Transport transport, ControllerHost host,
+                         TaskScheduler scheduler, TrackBankManager trackBankManager,
+                         DeviceBank[] canonicalDeviceBanks,
+                         ParkedRemoteControls parkedRemoteControls,
+                         DirectParameters directParameters) {
+        this(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary,
             transport, host, scheduler, trackBankManager, canonicalDeviceBanks,
-            System::currentTimeMillis);
+            System::currentTimeMillis, parkedRemoteControls, directParameters);
     }
 
     /**
@@ -118,6 +139,18 @@ public class DeviceHandler {
                   Transport transport, ControllerHost host,
                   TaskScheduler scheduler, TrackBankManager trackBankManager,
                   DeviceBank[] canonicalDeviceBanks, java.util.function.LongSupplier clock) {
+        this(cursorTrack, cursorDevice, remoteControlsPage, drumPadBank, deviceLibrary,
+            transport, host, scheduler, trackBankManager, canonicalDeviceBanks, clock, null, null);
+    }
+
+    private DeviceHandler(CursorTrack cursorTrack, CursorDevice cursorDevice,
+                          CursorRemoteControlsPage remoteControlsPage,
+                          DrumPadBank drumPadBank, DeviceLibrary deviceLibrary,
+                          Transport transport, ControllerHost host,
+                          TaskScheduler scheduler, TrackBankManager trackBankManager,
+                          DeviceBank[] canonicalDeviceBanks, java.util.function.LongSupplier clock,
+                          ParkedRemoteControls parkedRemoteControls,
+                          DirectParameters directParameters) {
         this.cursorTrack = cursorTrack;
         this.cursorDevice = cursorDevice;
         this.remoteControlsPage = remoteControlsPage;
@@ -129,6 +162,8 @@ public class DeviceHandler {
         this.trackBankManager = trackBankManager;
         this.canonicalDeviceBanks = prepareCanonicalDeviceBanks(canonicalDeviceBanks);
         this.clock = clock;
+        this.parkedRemoteControls = parkedRemoteControls;
+        this.directParameters = directParameters;
     }
 
     public void register(JsonRpcDispatcher dispatcher) {
@@ -712,6 +747,23 @@ public class DeviceHandler {
                 "No discovery in progress. Call device/discoverAll first.");
         });
 
+        // --- Phase 27: parked remote-control pages and panel (direct) parameters ---
+        // The wire contract plans 27-01 to 27-03 made the mock serve; each route is a one-line
+        // delegation to the init-time helper, and no proxy factory is called in any lambda
+        // (D-25-20). device/discoverAll and device/getDiscoveryResult above stay registered
+        // (D-27-05). An ok is never proof: the tool verifies by the page or panel read.
+        dispatcher.register("device/getRemoteControlPages", params ->
+            parked().readPages());
+
+        dispatcher.register("device/setRemoteControlValues", params ->
+            parked().writeValues(requireArray(params, "pages")));
+
+        dispatcher.register("device/getPanelParameters", params ->
+            direct().read());
+
+        dispatcher.register("device/setPanelParameter", params ->
+            direct().write(DirectParameters.panelId(params), DirectParameters.panelValue(params)));
+
         // Cursor track navigation
         dispatcher.register("cursor/selectTrack", params -> {
             String direction = requireString(params, "direction");
@@ -747,6 +799,20 @@ public class DeviceHandler {
             }
             return result;
         });
+    }
+
+    private ParkedRemoteControls parked() {
+        if (parkedRemoteControls == null) {
+            throw new IllegalStateException("REMOTE_CONTROLS_UNAVAILABLE");
+        }
+        return parkedRemoteControls;
+    }
+
+    private DirectParameters direct() {
+        if (directParameters == null) {
+            throw new IllegalStateException("PANEL_PARAMETERS_UNAVAILABLE");
+        }
+        return directParameters;
     }
 
     private static final class Observed<T> {

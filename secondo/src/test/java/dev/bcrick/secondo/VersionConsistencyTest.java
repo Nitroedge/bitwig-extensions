@@ -80,9 +80,14 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.5",
+            "0.2.6",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.5 (secondo Phase 26 CR-01 correction, plan 26-15; bumped "
+            "The engine's version is 0.2.6 (secondo Phase 27 remote controls and panel parameters, "
+                + "plan 27-06; bumped from 0.2.5 because this build changes wire behaviour and "
+                + "diagnose's version row must be able to tell it from the build before it: EIGHT "
+                + "NEW METHODS -- parked remote-control page cursors and direct-parameter panel "
+                + "reads and writes on the track and master cursor devices. 0.2.5 was the Phase 26 "
+                + "CR-01 correction, plan 26-15; bumped "
                 + "from 0.2.4 by the owner's option-a decision because this build changes wire "
                 + "behaviour and diagnose's version row must be able to tell it from the build "
                 + "before it: clip/insertFile now refuses every UNC and device spelling by its "

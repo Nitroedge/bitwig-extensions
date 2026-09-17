@@ -44,7 +44,7 @@ public final class SecondoVersion {
      * The single source of the engine's version. Changing it here is the whole change; the tests
      * named in this class's documentation fail until its twins are moved with it.
      */
-    public static final String VERSION = "0.2.5";
+    public static final String VERSION = "0.2.6";
 
     private SecondoVersion() {
         // Constant holder; never instantiated.

@@ -104,12 +104,26 @@ class HandlerRegistrationIntegrationTest {
         new TrackHandler(mockTrackBank, mockApplication, mockCursorTrack, trackBankManager, stateCache, mockNoteInput).register(dispatcher);
         new MasterHandler(mockMasterTrack).register(dispatcher);
         new ClipHandler(trackBankManager, mockSceneBank, mockCursorClip, stateCache).register(dispatcher);
-        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage, mockDrumPadBank, deviceLibrary, mockTransport, mockHost, (task, delay) -> task.run()).register(dispatcher);
+        // Phase 27: the helpers come from the same public factories init() calls, over deep-stub
+        // cursor devices (a plain mock answers null for every proxy the factories reach into).
+        CursorDevice trackHelperDevice = org.mockito.Mockito.mock(CursorDevice.class,
+            org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        CursorDevice masterHelperDevice = org.mockito.Mockito.mock(CursorDevice.class,
+            org.mockito.Mockito.RETURNS_DEEP_STUBS);
+        ParkedRemoteControls trackParked = ParkedRemoteControls.create(
+            trackHelperDevice, "secondo-track-page-", IMMEDIATE_SCHEDULER);
+        DirectParameters trackDirect = DirectParameters.attach(trackHelperDevice);
+        ParkedRemoteControls masterParked = ParkedRemoteControls.create(
+            masterHelperDevice, "secondo-master-page-", IMMEDIATE_SCHEDULER);
+        DirectParameters masterDirect = DirectParameters.attach(masterHelperDevice);
+        new DeviceHandler(mockCursorTrack, mockCursorDevice, mockRemoteControlsPage, mockDrumPadBank, deviceLibrary, mockTransport, mockHost, (task, delay) -> task.run(),
+            null, null, trackParked, trackDirect).register(dispatcher);
         new NoteHandler(mockCursorClip, stateCache).register(dispatcher);
         new ArrangerClipHandler(mockArrangerClip, stateCache).register(dispatcher);
         new SceneHandler(mockSceneBank, mockProject, stateCache).register(dispatcher);
         new ArrangerHandler(mockArranger, mockTransport, mockCueMarkerBank, mockScrollbar, stateCache).register(dispatcher);
-        new MasterDeviceHandler(mockMasterTrack, mockMasterCursorDevice, mockMasterRemoteControlsPage, deviceLibrary, (task, delay) -> task.run()).register(dispatcher);
+        new MasterDeviceHandler(mockMasterTrack, mockMasterCursorDevice, mockMasterRemoteControlsPage, deviceLibrary, (task, delay) -> task.run(),
+            masterParked, masterDirect).register(dispatcher);
         new SendHandler(trackBankManager, 4).register(dispatcher);
         new ProjectHandler(mockProject, stateCache).register(dispatcher);
         new TransactionHandler(dispatcher, stateCache).register(dispatcher);
@@ -154,6 +168,25 @@ class HandlerRegistrationIntegrationTest {
         for (String name : new String[] {
                 "clip/insertFile", "clip/browseToInsert",
                 "browser/browseMasterInsertDevice", "browser/browseMasterPresets"}) {
+            assertTrue(methods.contains(new JsonPrimitive(name)), "api/list lacks " + name);
+        }
+    }
+
+    /**
+     * Phase 27's eight routes reach api/list through the constructors init() uses, and the
+     * discovery pair they supersede for curated reads stays registered beside them (D-27-05).
+     */
+    @Test
+    void apiListContainsThePhase27Routes() {
+        String response = rpc("api/list", "{}");
+        JsonArray methods = JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonArray("result");
+        for (String name : new String[] {
+                "device/getRemoteControlPages", "device/setRemoteControlValues",
+                "device/getPanelParameters", "device/setPanelParameter",
+                "masterDevice/getRemoteControlPages", "masterDevice/setRemoteControlValues",
+                "masterDevice/getPanelParameters", "masterDevice/setPanelParameter",
+                "device/discoverAll", "device/getDiscoveryResult"}) {
             assertTrue(methods.contains(new JsonPrimitive(name)), "api/list lacks " + name);
         }
     }
