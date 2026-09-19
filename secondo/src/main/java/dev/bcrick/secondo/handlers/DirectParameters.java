@@ -240,13 +240,21 @@ public final class DirectParameters {
         return element.getAsString();
     }
 
-    /** The {@code value} param as the contract reads it: a JSON number (never a boolean). */
+    /**
+     * The {@code value} param as the contract reads it: a JSON number (never a boolean).
+     *
+     * <p>This is a TYPE fault and says so (IN-04). It used to report the range message below,
+     * which told a caller who had sent {@code "0.5"} or {@code true} that their number was out
+     * of 0.0-1.0 -- a false report, because no number was sent at all. The range message belongs
+     * to {@link #write}'s real bound check and stays there; the Python layer quotes whichever
+     * one it receives verbatim into the refusal the user hears, so the two must be different.
+     */
     public static double panelValue(JsonObject params) {
         JsonElement element = params.get("value");
         if (element == null || !element.isJsonPrimitive()
             || !element.getAsJsonPrimitive().isNumber()) {
             throw new IllegalArgumentException(
-                "panel parameter value out of range: 0.0-1.0, got " + element);
+                "panel parameter value must be a number, got " + element);
         }
         return element.getAsDouble();
     }

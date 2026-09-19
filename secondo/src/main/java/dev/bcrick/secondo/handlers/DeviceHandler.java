@@ -400,6 +400,51 @@ public class DeviceHandler {
             return new JsonPrimitive("ok");
         });
 
+        // Phase 29 (29-04, D-29-20 / D-29-22 / D-29-23 / D-29-24): load a saved preset file onto
+        // the track's device chain by absolute path -- the DIRECT-INSERT route the owner chose at
+        // the close of Phase 28 over the browser tag-walk, after three runs of the same operation
+        // produced three different failure shapes and one selected the wrong tag while believing
+        // it had found the right one.
+        //
+        // bitwig-api-reference.txt :14177 InsertionPoint#insertFile(String) -- whose own doc
+        // sentence is "Inserts the supplied file at this insertion point. If it's not possible to
+        // do so then this does nothing." It is silent on failure: it never throws and never
+        // returns. So this route's "ok" is NEVER proof that a device landed. It means exactly
+        // this: the path passed the engine-side checks and the call was dispatched. There is
+        // deliberately no field here claiming otherwise -- MacroHandler's own class comment is a
+        // dated record of what believing an accepted-for-dispatch "ok" cost.
+        //
+        // Why this route does NOT defer, though this phase builds deferral: v25 cannot enumerate
+        // inside a device slot or a layer, so there is nothing for a deferred verify to verify
+        // against (D-29-20). A deferral that cannot check anything would only delay the same
+        // unproven answer. The tool half, and the confirmation problem it has to solve, belong to
+        // Phase 30.
+        //
+        // The path rule is InsertFilePathValidator's, shared with clip/insertFile rather than
+        // cloned (D-29-23), so CR-01's parsed-root refusal of every UNC and device spelling and
+        // IN-02's name rule apply here unchanged (T-29-10). The checks are repeated engine-side
+        // because bitwig_call reaches this method without the Python checks (D-26-22).
+        //
+        // ACCEPTED RESIDUAL T-26-64 (owner answer (ii), 2026-09-16), second site: the validator's
+        // existence check runs on this control-surface thread, so a mapped network drive letter
+        // whose share is offline can stall the extension until Windows times the connection out.
+        // Accepted, not avoided -- nothing enforces the avoidance (T-29-09). The first site and
+        // the full reasoning are in InsertFilePathValidator's Javadoc.
+        //
+        // The optional "position" is the one insertBitwigDevice three lines above already takes:
+        // it already defaults to "end" and already refuses anything else with a -32602, so this
+        // registration accepts it rather than hard-coding one value beside a sibling that does
+        // not (D-29-21 as 29-RESEARCH revised it). Phase 30's three insertion targets are a
+        // NESTING axis -- chain, layer, slot chain -- not this ORDERING one, so nothing is
+        // pre-empted.
+        dispatcher.register("device/insertFile", params -> {
+            String path = requireString(params, "path");
+            String position = optionalString(params, "position", "end");
+            InsertFilePathValidator.validate(path, ".bwpreset", "preset file path");
+            getInsertionPoint(position).insertFile(path);
+            return new JsonPrimitive("ok");
+        });
+
         dispatcher.register("device/insertPluginDevice", params -> {
             String type = requireString(params, "type");
             String id = requireString(params, "id");

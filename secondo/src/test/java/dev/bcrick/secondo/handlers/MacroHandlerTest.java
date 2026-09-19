@@ -3,6 +3,7 @@ package dev.bcrick.secondo.handlers;
 import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.extension.StateCacheTestHelper;
+import dev.bcrick.secondo.rpc.CommandQueue;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import dev.bcrick.secondo.rpc.TaskScheduler;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -508,14 +510,35 @@ class MacroHandlerTest {
         ), callLog);
     }
 
+    /**
+     * Re-pointed at the deferred response (Phase 29, plan 29-01; re-pointed by plan 29-02).
+     *
+     * <p>{@code macro/writeClip} now CLAIMS its response, so {@code dispatcher.handle(...)}
+     * returns the deferral sentinel rather than a response string and there is nothing for
+     * {@link #handle} to parse. The answer reaches the caller through the queued command's
+     * future instead, which is what this drives — the same route
+     * {@code MacroHandlerDeferredResponseTest} uses, for the same reason.
+     *
+     * <p>The assertion itself is NOT relaxed. {@code count} still reads 3; what changed is that
+     * 3 is now the number of notes that LANDED rather than the number accepted. With
+     * {@link #IMMEDIATE_SCHEDULER} the whole write resolves inside the handler's own call stack,
+     * so the future is already done when the drain returns.
+     */
     @Test
     void writeClip_returnsCount() {
-        String response = handle("macro/writeClip", """
+        CommandQueue queue = new CommandQueue();
+        CompletableFuture<String> future = queue.enqueue("""
+            {"jsonrpc":"2.0","method":"macro/writeClip","id":1,"params":
             {"trackIndex":0,"sceneIndex":0,"lengthBeats":4,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1},
                       {"x":1,"y":62,"velocity":90,"duration":1},
-                      {"x":2,"y":64,"velocity":80,"duration":1}]}""");
-        JsonObject result = parseResult(response);
+                      {"x":2,"y":64,"velocity":80,"duration":1}]}}""");
+
+        queue.drainAndExecute(dispatcher);
+
+        assertTrue(future.isDone(),
+            "the deferred response was never completed, so the caller is still waiting");
+        JsonObject result = parseResult(future.getNow(null));
         assertEquals(3, result.get("count").getAsInt());
     }
 

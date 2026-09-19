@@ -32,6 +32,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -95,6 +99,7 @@ class DeviceHandlerTest {
         assertTrue(methods.contains("device/setParameterValue"));
         assertTrue(methods.contains("device/insertBitwigDevice"));
         assertTrue(methods.contains("device/insertPluginDevice"));
+        assertTrue(methods.contains("device/insertFile"));
         assertTrue(methods.contains("device/listBitwigDevices"));
         assertTrue(methods.contains("device/remove"));
         assertTrue(methods.contains("cursor/selectTrack"));
@@ -129,9 +134,10 @@ class DeviceHandlerTest {
     }
 
     @Test
-    void registersExactlyFortyMethods() {
-        // 36 before Phase 27, plus the four remote-control page and panel parameter routes.
-        assertEquals(40, dispatcher.getRegisteredMethods().size());
+    void registersExactlyFortyOneMethods() {
+        // 36 before Phase 27, plus the four remote-control page and panel parameter routes,
+        // plus Phase 29 plan 29-04's device/insertFile.
+        assertEquals(41, dispatcher.getRegisteredMethods().size());
     }
 
     // --- Phase 27: parked remote-control pages and panel parameters ---
@@ -549,6 +555,153 @@ class DeviceHandlerTest {
         when(mockCursorDevice.beforeDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("device/insertBitwigDevice", "{\"name\":\"Delay-2\",\"position\":\"before\"}"));
         verify(mockInsertionPoint).insertFile(Path.of("/devices/Delay-2.bwdevice").toString());
+    }
+
+    // --- Phase 29 (29-04): device/insertFile, the DIRECT-INSERT route (D-29-20 ... D-29-24) ---
+    //
+    // The refusal table below mirrors ClipHandlerTest's because it IS the same rule:
+    // InsertFilePathValidator, parameterised on the extension and the noun (D-29-23). Every
+    // refusal case asserts the insertion point was never touched, because CR-01's whole point is
+    // that a UNC spelling must be refused BEFORE Files.isRegularFile turns it into an outbound
+    // SMB request carrying this host's credentials, on Bitwig's control-surface thread (T-29-10).
+    // One case per spelling: a string-prefix test was already proven insufficient once.
+
+    @TempDir
+    Path presetDir;
+
+    private static String jsonString(String value) {
+        return "\"" + value.replace("\\", "\\\\") + "\"";
+    }
+
+    /** A refusal must land before the Bitwig call, not after it. */
+    private void assertInsertFileRefused(String path, String expectedMessage) {
+        when(mockCursorTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+        String response = dispatcher.handle(rpc("device/insertFile",
+            "{\"path\":" + jsonString(path) + "}"));
+        assertContains(response, "-32602");
+        assertContains(response, expectedMessage);
+        verify(mockInsertionPoint, never()).insertFile(anyString());
+    }
+
+    @Test
+    void deviceInsertFile_relativePath_refusedBeforeTheBitwigCall() {
+        assertInsertFileRefused("presets\\Woodwinds Street.bwpreset",
+            "preset file path is not absolute: ");
+    }
+
+    @Test
+    void deviceInsertFile_twoBackslashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\server\\share\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_twoForwardSlashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("//server/share/p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_backslashThenSlashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\/srv/share/p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_slashThenBackslashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("/\\srv\\share\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_questionMarkUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\UNC\\srv\\s\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_dotUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\.\\UNC\\srv\\s\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void deviceInsertFile_questionMarkLocalDevicePath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\C:\\presets\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    /** IN-02 generalised: a final component that is the extension and nothing else is not a name. */
+    @Test
+    void deviceInsertFile_fileNamedOnlyTheExtension_refusedForItsExtension() throws IOException {
+        Path onlyExtension = Files.writeString(presetDir.resolve(".bwpreset"), "x");
+        assertInsertFileRefused(onlyExtension.toString(),
+            "preset file path does not end in .bwpreset: ");
+    }
+
+    @Test
+    void deviceInsertFile_missingFile_refusedAsNotAnExistingFile() {
+        assertInsertFileRefused(presetDir.resolve("missing.bwpreset").toString(),
+            "preset file path is not an existing file: ");
+    }
+
+    @Test
+    void deviceInsertFile_forwardSlashDrivePath_reachesTheInsertionPointWithThePathAsGiven()
+            throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("forward.bwpreset"), "x");
+        String forwardSlashPath = preset.toString().replace('\\', '/');
+        when(mockCursorTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        String response = dispatcher.handle(rpc("device/insertFile",
+            "{\"path\":" + jsonString(forwardSlashPath) + "}"));
+
+        assertContains(response, "\"ok\"");
+        verify(mockInsertionPoint).insertFile(forwardSlashPath);
+    }
+
+    /**
+     * D-29-21 as 29-RESEARCH revised it: the optional position parameter already existed on the
+     * sibling registration three lines away, already defaults to "end", and already refuses
+     * anything else, so this route accepts it rather than hard-coding one value.
+     */
+    @Test
+    void deviceInsertFile_defaultPosition_isTheEndOfTheDeviceChain() throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("default.bwpreset"), "x");
+        when(mockCursorTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        dispatcher.handle(rpc("device/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + "}"));
+
+        verify(mockCursorTrack).endOfDeviceChainInsertionPoint();
+        verify(mockInsertionPoint).insertFile(preset.toString());
+    }
+
+    @Test
+    void deviceInsertFile_beforePosition_reachesTheBeforeDeviceInsertionPoint() throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("before.bwpreset"), "x");
+        when(mockCursorDevice.beforeDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        dispatcher.handle(rpc("device/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + ",\"position\":\"before\"}"));
+
+        verify(mockInsertionPoint).insertFile(preset.toString());
+    }
+
+    @Test
+    void deviceInsertFile_unknownPosition_refusedBeforeAnyInsertionPointIsResolved()
+            throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("sideways.bwpreset"), "x");
+
+        String response = dispatcher.handle(rpc("device/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + ",\"position\":\"sideways\"}"));
+
+        assertContains(response, "-32602");
+        // Gson escapes the message's single quotes as \u0027, so assert the quote-free parts.
+        assertContains(response, "position must be ");
+        assertContains(response, "got: sideways");
+        verify(mockCursorTrack, never()).endOfDeviceChainInsertionPoint();
+        verify(mockCursorDevice, never()).beforeDeviceInsertionPoint();
+        verify(mockCursorDevice, never()).afterDeviceInsertionPoint();
     }
 
     // --- Behavioral tests (Mockito) — Chain navigation ---

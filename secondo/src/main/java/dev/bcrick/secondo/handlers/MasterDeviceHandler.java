@@ -112,6 +112,33 @@ public class MasterDeviceHandler {
             return new JsonPrimitive("ok");
         });
 
+        // Phase 29 (29-04, D-29-20 / D-29-22 / D-29-23 / D-29-24): the master-chain twin of
+        // device/insertFile. Byte-for-byte the same body, differing only in the method prefix and
+        // in getInsertionPoint's "end" case, which resolves the MASTER track's end-of-chain
+        // insertion point -- the twin idiom this file already uses three lines above.
+        //
+        // bitwig-api-reference.txt :14177 InsertionPoint#insertFile(String) -- whose own doc
+        // sentence is "Inserts the supplied file at this insertion point. If it's not possible to
+        // do so then this does nothing." It is silent on failure. So this route's "ok" is NEVER
+        // proof that a device landed; it means the path passed the engine-side checks and the
+        // call was dispatched, and no field here claims more. v25 cannot enumerate inside a
+        // device slot or a layer, so there is nothing for a deferred verify to verify against --
+        // which is why this route does not defer (D-29-20). The tool half and the confirmation
+        // problem are Phase 30's.
+        //
+        // The path rule is InsertFilePathValidator's, shared with clip/insertFile and with
+        // device/insertFile rather than cloned (D-29-23): CR-01's parsed-root refusal of every
+        // UNC and device spelling, IN-02's name rule (T-29-10). ACCEPTED RESIDUAL T-26-64 (owner
+        // answer (ii), 2026-09-16) reaches here too -- the existence check runs on the
+        // control-surface thread; see InsertFilePathValidator's Javadoc for both ends (T-29-09).
+        dispatcher.register("masterDevice/insertFile", params -> {
+            String path = requireString(params, "path");
+            String position = optionalString(params, "position", "end");
+            InsertFilePathValidator.validate(path, ".bwpreset", "preset file path");
+            getInsertionPoint(position).insertFile(path);
+            return new JsonPrimitive("ok");
+        });
+
         dispatcher.register("masterDevice/insertPluginDevice", params -> {
             String type = requireString(params, "type");
             String id = requireString(params, "id");

@@ -64,6 +64,21 @@ class ParkedRemoteControlsTest {
     private PageFixture[] fixtures;
     private ParkedRemoteControls parked;
 
+    /**
+     * The re-park window's clock (WR-09), driven by hand. Every test runs at t=0 until it says
+     * otherwise, which is what makes "inside one window" and "after the window" assertable
+     * without sleeping -- and what keeps the window itself out of the wall clock, where a test
+     * that happened to straddle a 100 ms boundary would flake.
+     */
+    private long clockMs;
+
+    /** The width of the window under test; {@code ParkedRemoteControls.FLUSH_DELAY_MS} is private. */
+    private static final long REPARK_WINDOW_MS = 100;
+
+    private void advancePastTheReparkWindow() {
+        clockMs += REPARK_WINDOW_MS;
+    }
+
     /** One mocked parked cursor with every observer callback captured. */
     static final class PageFixture {
         final CursorRemoteControlsPage cursor = mock(CursorRemoteControlsPage.class);
@@ -152,6 +167,8 @@ class ParkedRemoteControlsTest {
             cursors[p] = fixtures[p].cursor;
         }
         parked = new ParkedRemoteControls(mockDevice, cursors, scheduler);
+        clockMs = 0;
+        parked.setMonotonicMs(() -> clockMs);
         existsCallback.valueChanged(true);
         deviceNameCallback.valueChanged("Polymer");
     }
@@ -240,6 +257,10 @@ class ParkedRemoteControlsTest {
         // Cursor 3 has drifted to page 0 and is showing page 0's controls (G3).
         fixtures[3].selectedCallback.valueChanged(0);
         fixtures[3].observeControls(0);
+        // The page-count callback in setup already scheduled a re-park for every then-unparked
+        // page, so the read below is inside that page's window unless the clock moves (WR-09).
+        // This test is about WHAT an unparked page publishes, not about the window's width.
+        advancePastTheReparkWindow();
         reset(fixtures[3].selected);
         scheduledTasks.clear();
         scheduledDelays.clear();
@@ -391,6 +412,9 @@ class ParkedRemoteControlsTest {
         observePageCount(4);
         parkAll();
         fixtures[2].selectedCallback.valueChanged(0);
+        // As above: setup's page-count callback opened this page's re-park window, and the
+        // refusal below schedules only once that window has expired (WR-09).
+        advancePastTheReparkWindow();
         reset(fixtures[2].selected);
 
         IllegalStateException error = assertThrows(IllegalStateException.class,
@@ -430,5 +454,125 @@ class ParkedRemoteControlsTest {
         assertTrue(scheduledTasks.isEmpty());
         // And no parked write moved any page.
         for (PageFixture fixture : fixtures) verify(fixture.selected, never()).set(anyInt());
+    }
+
+    // --- the re-park window (WR-09) ---
+    //
+    // Before this window existed, every read of an unparked page scheduled another zero-delay
+    // task, and readPages is precisely what a caller POLLS while waiting for a cursor to settle:
+    // a cursor that could not park enqueued one re-park per poll, unbounded, on the thread every
+    // other operation shares. The bound is a monotonic last-scheduled millisecond per page rather
+    // than a pending flag, because a flag cleared only by the task itself latches the gate shut
+    // for the session if one scheduled task never runs (the WR-06 lesson).
+
+    /** Drift page 3 off its own index and leave its re-park window expired. */
+    private void driftPageThreeWithAnExpiredWindow() {
+        observePageCount(4);
+        parkAll();
+        fixtures[3].selectedCallback.valueChanged(0);
+        advancePastTheReparkWindow();
+        reset(fixtures[3].selected);
+        scheduledTasks.clear();
+        scheduledDelays.clear();
+    }
+
+    @Test
+    void repark_twoReadsOfOneUnparkedPageInsideOneWindowScheduleExactlyOneTask() {
+        driftPageThreeWithAnExpiredWindow();
+
+        parked.readPages();
+        clockMs += REPARK_WINDOW_MS - 1;
+        parked.readPages();
+
+        assertEquals(1, scheduledTasks.size(),
+            "a second read inside the same window must not enqueue a second re-park: the set is "
+                + "idempotent and the first one has not been observed yet");
+        verify(fixtures[3].selected, times(1)).set(3);
+        // The page is still reported as unparked on BOTH reads -- the window bounds the
+        // scheduling, never what the read tells the caller.
+        assertFalse(page(parked.readPages(), 3).get("parked").getAsBoolean());
+    }
+
+    @Test
+    void repark_aReadAfterTheWindowSchedulesASecondTask() {
+        driftPageThreeWithAnExpiredWindow();
+
+        parked.readPages();
+        advancePastTheReparkWindow();
+        parked.readPages();
+
+        assertEquals(2, scheduledTasks.size(),
+            "the bound must EXPIRE on its own -- a window that never reopens is the latching a "
+                + "pending flag would have caused");
+        verify(fixtures[3].selected, times(2)).set(3);
+        for (long delay : scheduledDelays) assertEquals(0L, delay);
+    }
+
+    // --- malformed write payloads (WR-10) ---
+    //
+    // Each of these threw out of Gson before: IllegalStateException for a non-object (mapped to
+    // -32603 internal error, which tells the caller the ENGINE misbehaved) or
+    // NumberFormatException for a non-numeric field (an IllegalArgumentException subclass, so
+    // -32602 already -- but carrying Java's `For input string: "..."`, which names no field).
+    // Both are now a plain IllegalArgumentException naming the field, which is why every case
+    // below asserts the EXACT class: assertThrows(IllegalArgumentException.class) alone would
+    // pass on a NumberFormatException and prove nothing.
+
+    private void assertInvalidParams(String json, String expectedMessage) {
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+            () -> parked.writeValues(payload(json)));
+        assertSame(IllegalArgumentException.class, error.getClass(),
+            "the guard must throw IllegalArgumentException itself, not a Gson subclass: "
+                + "NumberFormatException would satisfy the declared type and still carry a "
+                + "message that names no field");
+        assertEquals(expectedMessage, error.getMessage());
+        for (PageFixture fixture : fixtures) {
+            for (SettableRangedValue value : fixture.values) {
+                verify(value, never()).setImmediately(anyDouble());
+            }
+        }
+    }
+
+    @Test
+    void writeValues_aPageElementThatIsNotAnObjectIsRefusedAsInvalidParams() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams("[\"pageIndex\"]", "each page must be an object, got \"pageIndex\"");
+    }
+
+    @Test
+    void writeValues_aStringPageIndexIsRefusedAsInvalidParamsNotAnInternalError() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":\"1\",\"params\":[{\"index\":0,\"value\":0.5}]}]",
+            "'pageIndex' must be a number, got \"1\"");
+    }
+
+    @Test
+    void writeValues_aStringParameterIndexIsRefusedAsInvalidParams() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":1,\"params\":[{\"index\":\"two\",\"value\":0.5}]}]",
+            "'index' must be a number, got \"two\"");
+    }
+
+    @Test
+    void writeValues_aBooleanParameterValueIsRefusedAsInvalidParams() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":1,\"params\":[{\"index\":0,\"value\":true}]}]",
+            "'value' must be a number, got true");
+    }
+
+    @Test
+    void writeValues_aParamElementThatIsNotAnObjectIsRefusedAsInvalidParams() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":1,\"params\":[7]}]",
+            "each param must be an object, got 7");
     }
 }

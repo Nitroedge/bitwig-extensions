@@ -350,9 +350,48 @@ class DirectParametersTest {
             JsonParser.parseString("{\"id\":\"a\",\"value\":true}").getAsJsonObject();
         IllegalArgumentException valueError = assertThrows(IllegalArgumentException.class,
             () -> DirectParameters.panelValue(booleanValue));
-        assertTrue(valueError.getMessage().startsWith("panel parameter value out of range: 0.0-1.0"));
+        // IN-04: a TYPE fault says so. It used to report the RANGE message, which told a caller
+        // who had sent `true` that their number was outside 0.0-1.0.
+        assertTrue(valueError.getMessage().startsWith("panel parameter value must be a number"),
+            "reported: " + valueError.getMessage());
         JsonObject good = JsonParser.parseString("{\"id\":\"a\",\"value\":0.25}").getAsJsonObject();
         assertEquals("a", DirectParameters.panelId(good));
         assertEquals(0.25, DirectParameters.panelValue(good), 1e-12);
+    }
+
+    /**
+     * IN-04, and the point of the finding: the two faults are different faults and a caller has
+     * only the message to tell them apart. The Python layer quotes the engine's message verbatim
+     * into the refusal the user hears, so a type fault wearing the range message told somebody
+     * who had sent a STRING that their NUMBER was out of bounds -- a false report that sends the
+     * reader looking at the wrong thing. The mock mirrors both messages in the same split
+     * (`mock/state.py::set_panel_parameter`), so the two sides cannot disagree about which one a
+     * caller sees.
+     */
+    @Test
+    void panelValue_theTypeFaultAndTheRangeFaultCarryDifferentMessages() {
+        idCallback.valueChanged(new String[] {"a"});
+
+        for (String json : new String[] {
+            "{\"id\":\"a\",\"value\":true}",
+            "{\"id\":\"a\",\"value\":\"0.5\"}",
+            "{\"id\":\"a\",\"value\":null}",
+            "{\"id\":\"a\"}",
+        }) {
+            JsonObject params = JsonParser.parseString(json).getAsJsonObject();
+            IllegalArgumentException typeError = assertThrows(IllegalArgumentException.class,
+                () -> DirectParameters.panelValue(params));
+            assertTrue(typeError.getMessage().startsWith("panel parameter value must be a number"),
+                json + " reported: " + typeError.getMessage());
+            assertFalse(typeError.getMessage().contains("out of range"),
+                "a type fault must not wear the range message: " + typeError.getMessage());
+        }
+
+        // The real bound check keeps the range message, on a value that really is a number.
+        IllegalArgumentException rangeError = assertThrows(IllegalArgumentException.class,
+            () -> direct.write("a", 1.2));
+        assertEquals("panel parameter value out of range: 0.0-1.0, got 1.2",
+            rangeError.getMessage());
+        verify(mockDevice, never()).setDirectParameterValueNormalized(anyString(), any(), any());
     }
 }

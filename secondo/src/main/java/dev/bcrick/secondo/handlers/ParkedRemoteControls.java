@@ -19,6 +19,7 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.requireArray;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.LongSupplier;
 
 /**
  * Eight remote-control page cursors parked one per page index on ONE cursor device (Phase 27,
@@ -94,6 +95,40 @@ public final class ParkedRemoteControls {
         return observed;
     }
 
+    /**
+     * The engine's scheduler delay, and the width of this class's re-park window (WR-09).
+     *
+     * <p>THIS IS THE FOURTH DECLARATION, and the one {@code FlushDelayConsistencyTest}'s class
+     * comment names as the thing it is most afraid of: a handler declaring its own copy under a
+     * private name would be scheduled by a number no test reads. It carries the same name, the
+     * same value and the same {@code private static final long} form as the declarations in
+     * {@code MacroHandler}, {@code DeviceHandler} and {@code MasterDeviceHandler} precisely so
+     * that test's source-text half finds it, and that test now names this file. A differently
+     * named private literal here would have slipped past it. Change all four or none.
+     *
+     * <p>Declared here, below the observe overloads rather than beside {@link #PARKED_PAGE_COUNT},
+     * only because secondo's {@code src/secondo/verify.py} cites this file's {@code :71-93} by
+     * line for the markInterested-first registration, and moving those lines would silently
+     * falsify a citation this plan may not edit.
+     */
+    private static final long FLUSH_DELAY_MS = 100;
+
+    /**
+     * The re-park window's clock, in monotonic milliseconds. A field rather than a direct call so
+     * a test can drive the window without sleeping; production never replaces it.
+     *
+     * <p>MONOTONIC, NEVER WALL-CLOCK. {@code System.currentTimeMillis()} can step backwards or
+     * forwards when the machine syncs its time mid-session, which would either reopen the window
+     * on every read (the unbounded scheduling this bound exists to stop) or hold it shut for
+     * hours (the latching this bound exists to avoid).
+     */
+    private LongSupplier monotonicMs = () -> System.nanoTime() / 1_000_000L;
+
+    /** Test seam: drive the re-park window's clock. Package-private; no handler calls it. */
+    void setMonotonicMs(LongSupplier clock) {
+        this.monotonicMs = clock;
+    }
+
     /** One parked cursor's observed state. */
     private final class ParkedPage {
         final int index;
@@ -104,6 +139,15 @@ public final class ParkedRemoteControls {
         final Observed<String>[] controlNames;
         final Observed<Double>[] values;
         final Observed<String>[] displays;
+        /**
+         * The monotonic millisecond at which a re-park was last scheduled for THIS page, or null
+         * until one has been. Per page, because one cursor drifting is not a reason to stop
+         * re-parking the other seven. Volatile because an observer callback and a handler read
+         * can reach {@link #scheduleRepark} from different threads; the worst a lost update can
+         * do here is schedule one extra idempotent task, which is what the old code did on every
+         * read.
+         */
+        volatile Long lastScheduledMs;
 
         @SuppressWarnings({"unchecked", "rawtypes"})
         ParkedPage(int index, CursorRemoteControlsPage cursor) {
@@ -149,13 +193,32 @@ public final class ParkedRemoteControls {
         }
 
         /**
-         * A zero-delay task setting this cursor's page to its own index. Scheduled, never called
-         * inline from an observer and never waited on (D-27-07). Deliberately NOT de-duplicated
-         * with a pending flag: the set is idempotent, and a flag cleared only by the task itself
-         * latches the gate shut for the session if one scheduled task never runs (the WR-06
-         * lesson from device/listChain).
+         * A zero-delay task setting this cursor's page to its own index, at most one per
+         * {@link #FLUSH_DELAY_MS} window per page. Scheduled, never called inline from an
+         * observer and never waited on (D-27-07).
+         *
+         * <p>Deliberately NOT de-duplicated with a pending flag: the set is idempotent, and a
+         * flag cleared only by the task itself latches the gate shut for the session if one
+         * scheduled task never runs (the WR-06 lesson from device/listChain). That reasoning is
+         * unchanged and is why the bound below is a MONOTONIC LAST-SCHEDULED MILLISECOND rather
+         * than a flag: it cannot latch, because it expires on its own whether or not the task it
+         * gated ever ran.
+         *
+         * <p>WHAT IT FIXES (WR-09). Every read of an unparked page scheduled another task, and
+         * {@code readPages} is exactly what a caller polls while waiting for a cursor to settle.
+         * A cursor that cannot park -- a device with fewer pages than it claims, a page Bitwig
+         * refuses to select -- therefore enqueued one re-park per poll, without bound, on the
+         * control-surface thread every other operation shares. The window caps that at one task
+         * per flush per page, which is the most that can usefully be in flight anyway: the
+         * scheduled set takes a flush to be observed.
          */
         void scheduleRepark() {
+            long now = monotonicMs.getAsLong();
+            Long last = lastScheduledMs;
+            if (last != null && now - last < FLUSH_DELAY_MS) {
+                return;
+            }
+            lastScheduledMs = now;
             scheduler.schedule(() -> cursor.selectedPageIndex().set(index), 0);
         }
     }
@@ -239,7 +302,9 @@ public final class ParkedRemoteControls {
      * {@code device/getRemoteControlPages} and its master twin: one synchronous cache read in the
      * shape plan 27-01's wire contract fixes. Every unobserved value is JSON null (the dispatcher
      * serializes nulls, D-25-15). Side effect: a zero-delay re-park for each unparked reachable
-     * page. The user-following cursor is never touched.
+     * page, at most one per {@link #FLUSH_DELAY_MS} window per page (WR-09 -- see
+     * {@code ParkedPage#scheduleRepark}, which is where the bound lives, so that a caller polling
+     * this read cannot enqueue one task per poll). The user-following cursor is never touched.
      */
     public JsonObject readPages() {
         JsonObject result = new JsonObject();
@@ -363,32 +428,67 @@ public final class ParkedRemoteControls {
      * -32603, with a re-park scheduled for each unparked page). Only then is each control written
      * with {@code setImmediately} on its own page's cursor. Nothing is scheduled for the write and
      * nothing sleeps (D-27-06, D-27-07). An ok is never proof: the tool reads the pages back.
+     *
+     * <p>EVERY RAW ACCESSOR IN THE FIRST BLOCK IS GUARDED BEFORE IT READS (WR-10). A non-object
+     * page element, a non-object param element, or a {@code pageIndex} / {@code index} /
+     * {@code value} that is a string or a boolean used to throw out of Gson --
+     * {@code IllegalStateException} or {@code NumberFormatException} -- and the dispatcher maps
+     * those to {@code -32603 internal error}, which tells the caller the ENGINE misbehaved and
+     * names no field. Each is now an {@code IllegalArgumentException} in
+     * {@code DirectParameters.panelId}'s style, so the caller gets {@code -32602 invalid params}
+     * and the name of the field that was wrong. The review marked this advisory; it is
+     * load-bearing now, because the Python side discriminates on the code.
+     *
+     * <p>The three loops AFTER the first one re-read those same fields raw, deliberately and
+     * safely: the first loop returns only when every element and every numeric field in the whole
+     * payload has been checked, and nothing mutates the payload in between.
      */
     public JsonObject writeValues(JsonArray payload) {
         if (payload.isEmpty()) {
             throw new IllegalArgumentException("pages array must not be empty");
         }
         int totalParams = 0;
-        // The device/setParameters validation block, with its messages unchanged.
+        // The device/setParameters validation block, with its messages unchanged -- and, since
+        // WR-10, every raw accessor in it guarded before it reads (see the method javadoc).
         for (JsonElement pageEl : payload) {
+            if (!pageEl.isJsonObject()) {
+                throw new IllegalArgumentException("each page must be an object, got " + pageEl);
+            }
             JsonObject page = pageEl.getAsJsonObject();
             if (!page.has("pageIndex")) {
                 throw new IllegalArgumentException("each page must have 'pageIndex'");
+            }
+            JsonElement pageIndexEl = page.get("pageIndex");
+            if (!pageIndexEl.isJsonPrimitive() || !pageIndexEl.getAsJsonPrimitive().isNumber()) {
+                throw new IllegalArgumentException(
+                    "'pageIndex' must be a number, got " + pageIndexEl);
             }
             JsonArray pageParams = requireArray(page, "params");
             if (pageParams.isEmpty()) {
                 throw new IllegalArgumentException("each page must have a non-empty 'params' array");
             }
             for (JsonElement paramEl : pageParams) {
+                if (!paramEl.isJsonObject()) {
+                    throw new IllegalArgumentException(
+                        "each param must be an object, got " + paramEl);
+                }
                 JsonObject p = paramEl.getAsJsonObject();
                 if (!p.has("index") || !p.has("value")) {
                     throw new IllegalArgumentException("each param must have 'index' and 'value'");
                 }
-                int idx = p.get("index").getAsInt();
+                JsonElement indexEl = p.get("index");
+                if (!indexEl.isJsonPrimitive() || !indexEl.getAsJsonPrimitive().isNumber()) {
+                    throw new IllegalArgumentException("'index' must be a number, got " + indexEl);
+                }
+                int idx = indexEl.getAsInt();
                 if (idx < 0 || idx >= CONTROLS_PER_PAGE) {
                     throw new IllegalArgumentException("parameter index out of range: 0-7, got " + idx);
                 }
-                double val = p.get("value").getAsDouble();
+                JsonElement valueEl = p.get("value");
+                if (!valueEl.isJsonPrimitive() || !valueEl.getAsJsonPrimitive().isNumber()) {
+                    throw new IllegalArgumentException("'value' must be a number, got " + valueEl);
+                }
+                double val = valueEl.getAsDouble();
                 if (val < 0.0 || val > 1.0) {
                     throw new IllegalArgumentException("parameter value out of range: 0.0-1.0, got " + val);
                 }

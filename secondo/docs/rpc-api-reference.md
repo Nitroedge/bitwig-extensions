@@ -1771,6 +1771,47 @@ Insert a built-in Bitwig device by name (case-insensitive).
 | `name` | string | yes | Device name (e.g., `"Polymer"`, `"EQ-5"`) |
 | `position` | string | no | `"end"` (default), `"before"`, or `"after"` cursor device |
 
+### `device/insertFile`
+
+Load a saved preset file onto the track cursor device's chain by absolute path (Phase 29, plan
+29-04, D-29-20 / D-29-22 / D-29-23 / D-29-24). The effect is
+`InsertionPoint#insertFile(path)` on the insertion point `position` names. This is the
+DIRECT-INSERT route, chosen at the close of Phase 28 over the browser tag-walk.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute local path to an existing `.bwpreset` file |
+| `position` | string | no | `"end"` (default — the end of the chain), `"before"`, or `"after"` cursor device |
+
+**`"ok"` is NEVER proof that a device landed.** Bitwig's own documentation of `insertFile` is
+*"Inserts the supplied file at this insertion point. If it's not possible to do so then this does
+nothing."* — it never throws and never returns. So this route's `"ok"` means exactly this: the
+path passed the engine-side checks and the call was dispatched. There is deliberately no field in
+the response claiming otherwise.
+
+**This route does not defer**, though the same build makes `macro/writeClip` deferrable. API v25
+cannot enumerate inside a device slot or a layer, so there is nothing for a deferred verify to
+verify against (D-29-20); a deferral that cannot check anything would only delay the same unproven
+answer. **The tool half, and the confirmation problem it has to solve, are Phase 30's.**
+
+Errors (`-32602`), checked in this order, all before `insertFile` is called — the same rule
+`clip/insertFile` uses, shared rather than cloned, so a correction to one is a correction to both:
+
+- `preset file path is not absolute: <path>`
+- `preset file path is a network path: <path>` (the path starts with any two separators, in any
+  mix of backslash and forward slash, or its parsed root is not a local drive-letter root such as
+  `C:\`; this refuses every UNC spelling, the `\\?\` and `\\.\` device prefixes, and a device path
+  to a local drive, without touching the filesystem)
+- `preset file path does not end in .bwpreset: <path>` (the final path component must end in
+  `.bwpreset`, case-insensitively, and be longer than the extension alone, so a file named only
+  `.bwpreset` is refused)
+- `preset file path is not an existing file: <path>` (also for a path the platform cannot parse)
+
+Every check before the last one is a pure string parse that touches nothing on disk or on the
+network. **Accepted residual (T-26-64, owner answer (ii), 2026-09-16):** the existence check does
+run on the control-surface thread, so a mapped network drive letter whose share is offline can
+stall the extension until Windows times the connection out.
+
 ### `device/insertPluginDevice`
 
 Insert a third-party plugin (VST2, VST3, or CLAP).
@@ -1929,7 +1970,9 @@ Set one direct (panel) parameter of the track cursor device by id. Returns `{ok:
 | `id` | string | yes | A direct-parameter id from the current id set |
 | `value` | number | yes | Normalized value (0.0 to 1.0) |
 
-Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value out of range: 0.0-1.0, got V` (-32602); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
+Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value must be a number, got X` (-32602, the TYPE fault — `value` was absent, a string, a boolean or anything else that is not a JSON number); `panel parameter value out of range: 0.0-1.0, got V` (-32602, the RANGE fault — a real number outside the bound); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
+
+**The type fault and the range fault are two different messages, and that is load-bearing** (IN-04, plan 29-05). Until the fourteenth pin move a caller who sent `"0.5"` or `true` was told their number was out of 0.0-1.0 — a false report, because no number had been sent at all. The Python tool layer quotes whichever message it receives verbatim into the refusal the user hears, so the two must never converge.
 
 ### `device/setParameterMapping`
 
@@ -2043,6 +2086,37 @@ Insert a built-in Bitwig device onto the master track.
 |-----------|------|----------|-------------|
 | `name` | string | yes | Device name (case-insensitive) |
 | `position` | string | no | `"end"` (default), `"before"`, `"after"` |
+
+### `masterDevice/insertFile`
+
+Load a saved preset file onto the MASTER track's device chain by absolute path (Phase 29, plan
+29-04). The master-chain twin of `device/insertFile`: the same body, differing only in the method
+prefix and in which track's end-of-chain insertion point `"end"` resolves to.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | yes | Absolute local path to an existing `.bwpreset` file |
+| `position` | string | no | `"end"` (default — the end of the master chain), `"before"`, or `"after"` |
+
+**`"ok"` is NEVER proof that a device landed**, for the same reason: `insertFile` "does nothing"
+when it cannot insert, and is silent about it. The `"ok"` means the path passed the engine-side
+checks and the call was dispatched, and no field claims more. **This route does not defer** (v25
+cannot enumerate inside a slot or a layer, so a deferred verify would have nothing to verify
+against — D-29-20). The tool half and the confirmation problem are Phase 30's.
+
+Errors (`-32602`), checked in this order, all before `insertFile` is called — the shared rule,
+identical to `device/insertFile` above:
+
+- `preset file path is not absolute: <path>`
+- `preset file path is a network path: <path>` (any two leading separators in any mix, or a parsed
+  root that is not a local drive-letter root; every UNC and device spelling is refused without
+  touching the filesystem)
+- `preset file path does not end in .bwpreset: <path>` (case-insensitive, and longer than the
+  extension alone)
+- `preset file path is not an existing file: <path>` (also for a path the platform cannot parse)
+
+**Accepted residual T-26-64** reaches here too: the existence check runs on the control-surface
+thread.
 
 ### `masterDevice/insertPluginDevice`
 
@@ -2198,7 +2272,9 @@ Set one direct (panel) parameter of the master cursor device by id. Returns `{ok
 | `id` | string | yes | A direct-parameter id from the current id set |
 | `value` | number | yes | Normalized value (0.0 to 1.0) |
 
-Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value out of range: 0.0-1.0, got V` (-32602); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
+Checks, in this order: `panel parameter id must be a non-empty string` (-32602); `panel parameter value must be a number, got X` (-32602, the TYPE fault — `value` was absent, a string, a boolean or anything else that is not a JSON number); `panel parameter value out of range: 0.0-1.0, got V` (-32602, the RANGE fault — a real number outside the bound); `PANEL_IDS_UNOBSERVED` (-32603); `PANEL_PARAMETER_ID_UNKNOWN: id` (-32602, an id outside the current set, for example one from the previous device; the setter is never called). Effect: the normalized direct-parameter setter with `round(value × 65535)` at resolution 65536. A stepped parameter snaps to its nearest step. Returns `PANEL_PARAMETERS_UNAVAILABLE` (-32603) only when the handler was built without the direct-parameter observers.
+
+**The type fault and the range fault are two different messages, and that is load-bearing** (IN-04, plan 29-05) — the same split, for the same reason, as `device/setPanelParameter` above.
 
 ### `masterDevice/setParameterMapping`
 
@@ -3440,44 +3516,193 @@ Extended note object fields for `macro/writeClip`:
 | `occurrence` | string | no | Condition enum |
 | `recurrence` | object | no | `{length, mask}` |
 
-#### What a successful response means (read this before trusting `count`)
+#### What the response means — `macro/writeClip` DEFERS (Phase 29, the fourteenth pin move)
 
-**`ok` means the write was ACCEPTED AND QUEUED. It does not mean the notes have landed.**
+**`macro/writeClip` is the ONE method in this engine whose response is deferred.** A top-level,
+single, non-notification `macro/writeClip` claims its response and answers LATER, from the
+scheduled task that did the work, with what actually happened. The answer you receive is a
+resolved outcome, not an acknowledgement.
 
-The returned `count` is how many notes were accepted, not how many were written. The write is
-carried out one or more flush cycles later, and before any note is written the engine compares the
-cursor clip's own observed absolute position — `Clip#getTrack().position()` and
-`Clip#clipLauncherSlot().sceneIndex()` — against the `(trackIndex, sceneIndex)` you named. It
-re-reads that position every 100 ms up to a 250 ms ceiling, because the observers are themselves on
-the flush cycle and one read can be a flush stale.
+**Which methods defer, and which do not.** Deferral is opt-in per method and deliberately narrow:
 
-- **On a match:** the notes are written, then their expressions one flush later, with the position
-  checked again first.
-- **On a mismatch at the ceiling:** the write is **REFUSED**. Nothing is written — not to the slot
-  you named and not to the slot the cursor was on. It is never retried onto a different slot and
-  never written with a warning.
+| Method | Answers with | Why |
+|---|---|---|
+| `macro/writeClip` | the **resolved** outcome (one of four terminal paths below) | one clip, bounded by `CURSOR_VERIFY_CEILING_MS` plus one expression hop — roughly 300 ms of engine-internal scheduling |
+| `macro/buildSection` | accepted-and-queued (unchanged) | the `clips` array has no upper bound |
+| `macro/buildSong` | accepted-and-queued (unchanged) | unbounded chain |
+| `macro/setupScenes` | accepted-and-queued (unchanged) | unbounded chain |
+| `macro/writeAutomation` | accepted-and-queued (unchanged) | unbounded chain |
 
-**Where a refusal shows up.** Not in this response — see the note on `-32011` below. Two places,
-both retrievable after the fact:
+The four chain macros keep the pre-Phase-29 contract because their chains cost roughly
+`FLUSH_DELAY_MS` (100 ms) per clip plus an expression hop, so a 25-clip chain costs about 5,000 ms
+— past both five-second walls (`HttpRpcServer.TIMEOUT_MS` and the Python client's `read=5.0`).
+They cannot answer inside either one, so they do not pretend to (D-29-05).
 
-1. **Bitwig's Controller Script Console** (`View → Controller Script Console`, or the extension's
-   log for Secondo). Search for the literal marker `SECONDO-CURSOR-MISMATCH`, or
-   `SECONDO-NOTE-WRITE-FAILED` for a correctly-targeted write that failed anyway. Each line carries
-   an ISO-8601 timestamp, the requested and observed positions, and the note count.
-2. **`session/snapshot`**, in the `clip` section: `writeClipRefusals` (how many writes have been
-   refused this session) and `lastWriteClipRefusal` (`{timestamp, method, code, marker,
-   requestedTrack, requestedScene, observedTrack, observedScene, noteCount}`, or `null` if nothing
-   has been refused). A caller that wants to confirm a write landed can read `writeClipRefusals`
-   before and after.
+**The deferred SUCCESS payload.** `{count, landed, deferred: true, deferReason: null}`. `count` is
+the note total actually WRITTEN, `landed` is the per-clip detail, and `deferred: true` says this
+answer came from the resolved path. Every key is always present; `deferReason` is an explicit JSON
+null rather than an omitted key.
 
-**On `-32011` / `-32012`.** `JsonRpcError.CURSOR_MISMATCH = -32011` and
-`NOTE_WRITE_FAILED = -32012` are declared in the engine but are **not reachable in a response at
-this build**. A handler runs inside Bitwig's `flush()` on the Control Surface Session thread and
-`host.scheduleTask` schedules onto that same thread, so a handler cannot wait for its own deferred
-verify without blocking the flush the verify needs — the response has already been sent by the time
-the outcome is known. Making an RPC response completable after its handler returns is **Phase 29
-(Engine — Deferrable RPC Responses)**; that is what will carry these codes in the `error` object.
-The numbers are declared now so they are pinned before any client depends on them.
+**The DECLINED acknowledgement.** `{count, deferred: false, deferReason: "<reason>"}`. `count` is
+how many notes were ACCEPTED, never how many landed — the old contract, unchanged, and the
+response now says so in its own fields. Two reasons, told apart by the VALUE and never by prose:
+
+- `"not-deferrable"` — the dispatcher would not let this request defer at all: it is a
+  notification, a batch element, or an operation inside `session/transaction`.
+- `"queue-busy"` — deferral was available and was DECLINED at the front door, because a write
+  behind another write or a chain cannot resolve in time.
+
+##### The deferral deadline: 3000 ms, and `-32013`
+
+Every deferral that is taken is armed with a **3000 ms** deadline (`DEFERRAL_DEADLINE_MS`). It is
+a ten-times margin over the ~300 ms worst case a lone write costs, and it is strictly inside both
+five-second walls, so no caller ever hits a bodiless transport timeout with no id.
+
+When it fires, the caller is answered with `-32013 WRITE_UNRESOLVED`. **It does not mean the write
+failed.** It means the engine could not resolve it in time, so **the write may still have landed**:
+read the slot back, and **do not retry** — a retry of a creating write puts a second copy of the
+notes in the clip.
+
+##### Inside a transaction, and inside a batch: the decided answer
+
+An operation inside `session/transaction` that would otherwise defer **does not defer**, and its
+per-operation result carries an explicit marker saying so: `deferred: false` with
+`deferReason: "not-deferrable"`. The same holds for a batch element and for a notification. This
+is the engine's decided answer to "what does a deferring method do inside a transaction" (D-29-15,
+D-29-16): a transaction runs its operations through the internal dispatch path, which has no
+request id to claim and no response of its own to hold open, so the honest thing is the
+accepted-and-queued contract plus a marker naming why — never a silent downgrade a caller would
+have to infer.
+
+##### Behind a busy queue: declined, not deferred
+
+A `macro/writeClip` that arrives while another write is in flight, or with one already queued
+ahead of it, answers **immediately** with `deferred: false` and `deferReason: "queue-busy"`. It is
+not made to wait out a deadline it provably cannot meet. Declining is strictly better three ways:
+the caller learns the same fact (the outcome is not yet known) about 2.7 seconds sooner; one of
+only four HTTP pool threads is not held for the whole deadline while `/health` queues behind it;
+and the answer when it finally came would have been `-32013` anyway (D-29-06).
+
+##### The three codes, their meanings and their `data` shapes
+
+Every key listed is **ALWAYS present**, and is **JSON null** when the engine did not observe it.
+A reader tests whether a value is null; it never tests key membership.
+
+**`-32011 CURSOR_MISMATCH`** — *"the cursor clip was not on the slot this write named, so nothing
+was written"*. The engine compares the cursor clip's own observed absolute position
+(`Clip#getTrack().position()` and `Clip#clipLauncherSlot().sceneIndex()`) against the
+`(trackIndex, sceneIndex)` you named, re-reading every 100 ms up to a 250 ms ceiling, and refuses
+at the ceiling. Nothing is written — not to the slot you named and not to the slot the cursor was
+on. It is never retried onto a different slot and never written with a warning.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `requestedTrack` | integer | the track you named |
+| `requestedScene` | integer | the scene you named |
+| `cursorTrack` | integer or **null** | where the launcher cursor clip actually was; null when never observed |
+| `cursorScene` | integer or **null** | the same, for the scene; null when never observed |
+| `ceilingMs` | integer | `250` — how long the cursor was given to agree |
+| `finding` | string | `"TODO-WRONG-SLOT"` — which finding this refusal belongs to |
+| `clipCreated` | boolean | whether this write created a clip at the named slot |
+| `clipRemoved` | boolean | whether that clip was removed again |
+| `leftoverReason` | string or **null** | why a clip was LEFT at the named slot; null when nothing was left |
+
+The `-1` sentinel the engine uses internally for "never observed" **never leaves the engine**: it
+is published as JSON null, so a refusal can never tell a user the cursor was on "track -1".
+
+**`-32012 NOTE_WRITE_FAILED`** — *"the cursor was on the named slot and the write itself failed:
+&lt;reason&gt;"*. The targeting was right and the write threw.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `requestedTrack` | integer | the track you named |
+| `requestedScene` | integer | the scene you named |
+| `reason` | string | the underlying failure text |
+| `finding` | string | `"TODO-WRONG-SLOT"` |
+| `clipCreated` | boolean | false when `clip/create` itself threw, true when the failure came later |
+| `clipRemoved` | boolean | **always false** — see below |
+| `leftoverReason` | string or **null** | `"a failed write may have written something, so this path removes nothing"`, or null when no clip was created |
+
+**`-32013 WRITE_UNRESOLVED`** — the deadline fired. The write MAY STILL HAVE LANDED.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `deadlineMs` | integer | `3000` — the deadline that fired |
+| `requestedTrack` | integer | the track you named |
+| `requestedScene` | integer | the scene you named |
+| `noteCount` | integer | how many notes were sent |
+| `clipCreated` | boolean | whether a clip was created at the named slot |
+| `clipRemoved` | boolean | **always false** — the deadline removes nothing, because it does not know what happened |
+
+##### The fourth outcome is a SUCCESS, not an error
+
+If the notes land on the slot you named and the cursor then moves before their expressions can be
+applied, the engine answers with a **success** carrying `expressions: "refused"`, alongside
+`clipCreated` and `clipRemoved: false` and the usual `count` / `landed`. It is not `-32011`.
+
+The notes are in your clip. Only the expression pass was refused. Reporting this as a cursor
+mismatch would tell a caller nothing was written and invite a re-issue — and a re-issue of a
+creating write puts a second copy of the notes in the owner's own music (T-29-07). Do not write
+them again; apply the expressions separately if you want them.
+
+##### What a refusal does to the SLOT
+
+Phase 1 of the write creates a clip at the slot you named — that is what makes the slot
+addressable and what the verify then reads — so a refusal that says "nothing was written" while
+leaving an empty clip behind would be a false report. Two separate keys say what happened, rather
+than prose a program would have to parse:
+
+- **`clipRemoved: true`** — the clip this write created was removed again. This happens on
+  `-32011` **only**, and **only** when the named slot was proven empty before the creation: in
+  range, observed, and observed empty. The removal is addressed by your own `(trackIndex,
+  slotIndex)` through `clip/delete`, never by the cursor — the whole reason we are here is that
+  the cursor is somewhere else.
+- **`clipRemoved: false` with a `leftoverReason`** — a clip was left, and the reason says which
+  of three facts held: the slot already held content before this write; the slot's emptiness was
+  never observed; or the removal ran and did not succeed. These are different facts, not degrees
+  of one.
+
+`-32012` and `-32013` remove **nothing**, ever. A write that failed may have written something,
+and a deadline does not know what happened; neither slot's content is the engine's to delete.
+
+##### Where a refusal shows up now
+
+1. **In this response**, as the `error` object described above. This is the Phase 29 change.
+2. **Bitwig's Controller Script Console** (`View → Controller Script Console`, or the extension's
+   log for Secondo), unchanged. Search for the literal marker `SECONDO-CURSOR-MISMATCH`, or
+   `SECONDO-NOTE-WRITE-FAILED` for a correctly-targeted write that failed anyway. Each line
+   carries an ISO-8601 timestamp, the requested and observed positions, and the note count. **The
+   wording of these lines is deliberately unchanged**: owners are told to search for those
+   literals, so the response joins them rather than replacing them (D-29-13).
+3. **`session/snapshot`**, in the `clip` section: `writeClipRefusals` — how many writes have been
+   refused this session. **`lastWriteClipRefusal` is RETIRED at this build.** The per-refusal
+   detail existed only to carry what the response can now carry itself, and a second copy of a
+   fact is free to disagree with the first. The **counter stays**, and the reason it stays is the
+   table at the top of this section: the four chain macros do not defer, so for them the counter
+   is the only machine-readable refusal signal there is. A caller that wants to confirm a chain
+   landed can still read `writeClipRefusals` before and after.
+
+##### Superseded, kept as the dated record it is (what was true from the sixth pin move until the fourteenth)
+
+> **`ok` means the write was ACCEPTED AND QUEUED. It does not mean the notes have landed.** The
+> returned `count` is how many notes were accepted, not how many were written.
+>
+> **Where a refusal shows up.** Not in this response. Two places, both retrievable after the
+> fact: the Controller Script Console markers, and `session/snapshot`'s `writeClipRefusals` and
+> `lastWriteClipRefusal` (`{timestamp, method, code, marker, requestedTrack, requestedScene,
+> observedTrack, observedScene, noteCount}`, or `null` if nothing had been refused).
+>
+> **On `-32011` / `-32012`.** `JsonRpcError.CURSOR_MISMATCH = -32011` and
+> `NOTE_WRITE_FAILED = -32012` were declared in the engine but were **not reachable in a response
+> at that build**. A handler runs inside Bitwig's `flush()` on the Control Surface Session thread
+> and `host.scheduleTask` schedules onto that same thread, so a handler could not wait for its own
+> deferred verify without blocking the flush the verify needed — the response had already been
+> sent by the time the outcome was known. The numbers were declared then so they were pinned
+> before any client depended on them.
+
+That last paragraph is the one this build falsified. The thread facts in it are still exactly
+true — a handler still cannot block on its own verify, and it still returns before the notes land.
+What changed is that the RESPONSE no longer has to leave when the handler does.
 
 **Writes are serialised.** A second `macro/writeClip` or `macro/buildSection` does not create its
 clips or move the cursor until the write in front of it has finished its last cursor-scoped step,
@@ -3550,6 +3775,13 @@ Phase 29 then changes only how the answer travels back, on top of a path already
 large change to the RPC core inside a remediation phase whose premise was small and bisectable is
 the mistake the engine-phase split exists to avoid.
 
+*[Closed 2026-09-19, at the fourteenth pin move.]* Phase 29 delivered it. `macro/writeClip` now
+claims its response and completes it from the scheduled task with the real outcome, carrying
+`-32011`, `-32012` and the new `-32013` as error objects; the four chain macros keep the
+accepted-and-queued contract on purpose. The sequencing above is recorded as it was decided and is
+the record of why the split was taken, not a statement about this build. See "What the response
+means — `macro/writeClip` DEFERS" above for what a caller reads today.
+
 **`PinnableCursorClip#isPinned()` is an UNPROBED hardening option and must not gate any of the
 above.** `createLauncherCursorClip` returns `PinnableCursorClip` (`:8832`) and `PinnableCursor`
 declares `SettableBooleanValue isPinned()` (`:16186-16196`); pinning after the phase-1 selection
@@ -3580,7 +3812,15 @@ than written to whatever the cursor drifted onto, and the console line names bot
 `landed=[t0s2,t1s2] notWritten=[t2s2,t3s2]` — so it is clear which clips exist and which were never
 attempted. The parameter validation errors (a clip missing `trackIndex`, an empty `clips` array)
 are still returned in the response as `INVALID_PARAMS`; it is only the post-acceptance outcome that
-travels by log and snapshot until Phase 29.
+travels by log and snapshot rather than in the response.
+
+**This method does NOT defer, and that is deliberate.** `macro/writeClip` answers with its resolved
+outcome since the fourteenth pin move; `macro/buildSection` does not, because its `clips` array has
+no upper bound and a chain of any length cannot answer inside either five-second wall (D-29-05).
+Its response therefore still means accepted-and-queued, and `session/snapshot`'s `writeClipRefusals`
+counter is the machine-readable refusal signal for it — which is exactly why that counter was kept
+when `lastWriteClipRefusal` was retired. See `macro/writeClip`'s section above for the full table of
+which methods defer.
 
 ### `macro/setupScenes`
 

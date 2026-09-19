@@ -80,9 +80,22 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.6",
+            "0.2.7",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.6 (secondo Phase 27 remote controls and panel parameters, "
+            "The engine's version is 0.2.7 (secondo Phase 29 deferrable RPC responses, plan "
+                + "29-08; bumped from 0.2.6 because this build changes wire behaviour and "
+                + "diagnose's version row must be able to tell it from the build before it, and a "
+                + "SHA is not something a caller can ask the DAW for. THREE LAUNCHER-WRITE CODES "
+                + "NOW TRAVEL IN THE RESPONSE where none did: a top-level single "
+                + "macro/writeClip defers its response and completes it from the scheduled task "
+                + "with the real outcome, carrying CURSOR_MISMATCH (-32011), NOTE_WRITE_FAILED "
+                + "(-32012) and the new WRITE_UNRESOLVED (-32013) as error objects, bounded by a "
+                + "3000 ms deferral deadline; a refused write now REMOVES the clip it created "
+                + "into a slot proven empty beforehand; session/snapshot's per-refusal detail "
+                + "lastWriteClipRefusal is RETIRED while the writeClipRefusals counter is kept "
+                + "for the four chain macros, which do not defer; and TWO NEW METHODS -- "
+                + "device/insertFile and masterDevice/insertFile -- move the dispatchable surface "
+                + "340 -> 342. 0.2.6 was secondo Phase 27 remote controls and panel parameters, "
                 + "plan 27-06; bumped from 0.2.5 because this build changes wire behaviour and "
                 + "diagnose's version row must be able to tell it from the build before it: EIGHT "
                 + "NEW METHODS -- parked remote-control page cursors and direct-parameter panel "

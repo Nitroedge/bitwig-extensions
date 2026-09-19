@@ -79,6 +79,16 @@ public class StateCache {
 
     // Clip state — [trackIndex][slotIndex]
     private final boolean[][] clipHasContent = new boolean[TRACK_COUNT][SCENE_COUNT];
+
+    // Has the has-content observer above EVER fired for this slot? (Phase 29, plan 29-03.)
+    //
+    // The array beside it is primitive, so it has no unobserved state: before any observer has
+    // fired every slot reads as empty, and clipHasContent() returns false for an out-of-range
+    // coordinate too. That makes "was this slot empty before we created a clip in it?" a question
+    // with no answer to read — which is fine while the answer is only displayed, and NOT fine now
+    // that a refusal DELETES on it. This parallel array is what makes "never observed"
+    // distinguishable from "observed empty", so the undo can withhold rather than guess.
+    private final boolean[][] clipHasContentObserved = new boolean[TRACK_COUNT][SCENE_COUNT];
     private final boolean[][] clipIsPlaying = new boolean[TRACK_COUNT][SCENE_COUNT];
     private final boolean[][] clipIsRecording = new boolean[TRACK_COUNT][SCENE_COUNT];
     private final boolean[][] clipIsPlaybackQueued = new boolean[TRACK_COUNT][SCENE_COUNT];
@@ -198,15 +208,20 @@ public class StateCache {
     private volatile int clipCursorTrackPosition = -1;
     private volatile int clipCursorSceneIndex = -1;
 
-    // The refusal counter and the last refusal, published in the clip snapshot section.
+    // The refusal counter, published in the clip snapshot section.
     //
-    // This exists because at this pin the refusal CANNOT travel in the RPC response (see
-    // JsonRpcError.CURSOR_MISMATCH). host.errorln alone would put it in a console the owner has to
-    // have been watching; a counter in the snapshot is retrievable after the fact, which is what
-    // "a bounded result has to announce its boundary" needs to mean when the boundary is hit
-    // asynchronously. Phase 29 makes the response carry it; this stays as the session tally.
+    // WHAT WAS TRUE FROM THE SIXTH PIN MOVE UNTIL THE FOURTEENTH: this counter stood beside a
+    // per-refusal detail object, because at those pins the refusal COULD NOT travel in
+    // the RPC response (see JsonRpcError.CURSOR_MISMATCH). host.errorln alone would put it in a
+    // console the owner has to have been watching; a detail in the snapshot was retrievable after
+    // the fact, which is what "a bounded result has to announce its boundary" needed to mean when
+    // the boundary was hit asynchronously.
+    //
+    // From Phase 29 (plan 29-03) the detail is RETIRED and only the tally remains. The refusal
+    // now travels in the response for macro/writeClip; the four chain macros still do not defer,
+    // and this counter is their only machine-readable refusal signal. See
+    // recordWriteClipRefusal's own comment for the whole of D-29-13.
     private volatile int writeClipRefusals;
-    private volatile JsonObject lastWriteClipRefusal;
 
     // Arranger cursor clip state (D-06). Deliberately NOT a copy of the launcher block above:
     //
@@ -606,8 +621,13 @@ public class StateCache {
             ClipLauncherSlotBank slotBank = track.clipLauncherSlotBank();
 
             // Bank-level indexed observers
-            slotBank.addHasContentObserver((IndexedBooleanValueChangedCallback) (slotIndex, value) ->
-                clipHasContent[trackIdx][slotIndex] = value);
+            // The observed flag is set in the SAME lambda that assigns the value, so the two
+            // cannot drift: anything that reports a has-content value has, by definition,
+            // observed that slot.
+            slotBank.addHasContentObserver((IndexedBooleanValueChangedCallback) (slotIndex, value) -> {
+                clipHasContent[trackIdx][slotIndex] = value;
+                clipHasContentObserved[trackIdx][slotIndex] = true;
+            });
 
             slotBank.addIsPlayingObserver((IndexedBooleanValueChangedCallback) (slotIndex, value) ->
                 clipIsPlaying[trackIdx][slotIndex] = value);
@@ -1413,41 +1433,75 @@ public class StateCache {
         return writeClipRefusals;
     }
 
-    /** The last refusal detail, or null if nothing has been refused this session. */
-    public JsonObject getLastWriteClipRefusal() {
-        return lastWriteClipRefusal;
-    }
-
     /**
-     * Record a refused or failed launcher write so it is retrievable from a snapshot after the
-     * fact, not only from whichever console happened to be open when it occurred.
+     * Count one refused or failed launcher write, so a session tally survives a console nobody
+     * was watching.
+     *
+     * <p>WHAT WAS NARROWED HERE, AND WHY (Phase 29, plan 29-03, D-29-13). This method used to
+     * build a nine-key detail object and publish it beside the counter, in the clip snapshot
+     * section, under a key naming the last refusal. That detail is RETIRED. It existed only because at pin {@code 3b53206} a refusal
+     * could not travel in the RPC response at all, so the snapshot was the only place a caller
+     * could retrieve one after the fact. From Phase 29 the refusal travels in the response for
+     * {@code macro/writeClip} — with the caller's own request id, the code, and a {@code data}
+     * object that also says what happened to the slot — and a second copy in the snapshot is a
+     * second source of truth that can disagree with the first.
+     *
+     * <p>The COUNTER is deliberately kept rather than retired with it. The four chain macros —
+     * {@code macro/buildSection}, {@code macro/buildSong}, {@code macro/setupScenes},
+     * {@code macro/writeAutomation} — keep accepted-and-queued semantics by D-29-05: they do not
+     * defer, so their refusals reach no response, and this counter is their ONLY machine-readable
+     * refusal signal. A before-and-after read of it is what a caller of those four has instead.
      *
      * <p>Both the mismatch case ({@code CURSOR_MISMATCH}) and the write-failure case
-     * ({@code NOTE_WRITE_FAILED}) land here, distinguished by {@code code}: a caller that only
-     * counted mismatches would under-report exactly the writes that silently lost notes.
+     * ({@code NOTE_WRITE_FAILED}) still land here and are counted together: a tally that only
+     * counted mismatches would under-report exactly the writes that silently lost notes. The two
+     * are told apart by the marked {@code host.errorln} line and, for {@code macro/writeClip}, by
+     * the response's own error code.
      */
-    public void recordWriteClipRefusal(String timestamp, String method, int code, String marker,
-                                       int requestedTrack, int requestedScene,
-                                       int observedTrack, int observedScene, int noteCount) {
-        JsonObject detail = new JsonObject();
-        detail.addProperty("timestamp", timestamp);
-        detail.addProperty("method", method);
-        detail.addProperty("code", code);
-        detail.addProperty("marker", marker);
-        detail.addProperty("requestedTrack", requestedTrack);
-        detail.addProperty("requestedScene", requestedScene);
-        detail.addProperty("observedTrack", observedTrack);
-        detail.addProperty("observedScene", observedScene);
-        detail.addProperty("noteCount", noteCount);
-        this.lastWriteClipRefusal = detail;
+    public void recordWriteClipRefusal() {
         this.writeClipRefusals = writeClipRefusals + 1;
     }
 
     public boolean clipHasContent(int trackIndex, int slotIndex) {
-        if (trackIndex < 0 || trackIndex >= TRACK_COUNT || slotIndex < 0 || slotIndex >= SCENE_COUNT) {
+        if (!clipSlotInRange(trackIndex, slotIndex)) {
             return false;
         }
         return clipHasContent[trackIndex][slotIndex];
+    }
+
+    /**
+     * Has the launcher's has-content observer ever reported this slot?
+     *
+     * <p>This exists because {@link #clipHasContent(int, int)} cannot answer "was this slot
+     * empty?" on its own. Its backing array is primitive: before any observer has fired every
+     * slot reads as empty, and an out-of-range coordinate reads as empty too. Those two are
+     * indistinguishable from a genuinely empty slot, which is harmless while the answer is only
+     * reported and dangerous the moment something DELETES on it — {@code MacroHandler}'s
+     * undo-on-refusal does, and withholds the delete whenever this returns false (D-29-11).
+     *
+     * <p>Out of range returns false, using the same guard the value getter uses: a coordinate
+     * that cannot be observed has not been observed.
+     */
+    public boolean clipHasContentObserved(int trackIndex, int slotIndex) {
+        if (!clipSlotInRange(trackIndex, slotIndex)) {
+            return false;
+        }
+        return clipHasContentObserved[trackIndex][slotIndex];
+    }
+
+    /**
+     * Is this (track, slot) pair inside the launcher window this cache models?
+     *
+     * <p>Public, and separate from the two getters that use it, because a caller deciding whether
+     * to DELETE a clip must be able to name the in-range check as its own fact. The alternative —
+     * inferring it from a getter that answers false both for "out of range" and for "not
+     * observed" — is exactly the conflation this plan exists to remove. It also keeps
+     * {@code MacroHandler} from becoming another declaration of the two ceilings; it is a
+     * consumer of them, through here.
+     */
+    public boolean clipSlotInRange(int trackIndex, int slotIndex) {
+        return trackIndex >= 0 && trackIndex < TRACK_COUNT
+            && slotIndex >= 0 && slotIndex < SCENE_COUNT;
     }
 
     public void setClipStepSize(double stepSize) {
@@ -2244,12 +2298,13 @@ public class StateCache {
         obj.addProperty("useLoopStartAsQuantizationReference", clipUseLoopStartAsQuantizationReference);
         obj.addProperty("isLoopEnabled", clipLoopEnabled);
         obj.addProperty("loopStart", clipLoopStart);
-        // Refused launcher writes, this session (Phase 23, plan 23-08). `lastWriteClipRefusal` is
-        // JSON null until something is refused -- an absent key and a null-valued key read the
-        // same to a caller that checks for content, and a stable key set is easier to mirror.
+        // Refused launcher writes, this session (Phase 23, plan 23-08; narrowed by Phase 29, plan
+        // 29-03). The count is KEPT and the per-refusal detail that stood beside it is RETIRED:
+        // the detail now travels in the RPC response for macro/writeClip, and the four chain
+        // macros — which do not defer — still have this counter. D-29-13, and the narrowing is
+        // stated by name in recordWriteClipRefusal's comment and in the API reference rather than
+        // being made silently.
         obj.addProperty("writeClipRefusals", writeClipRefusals);
-        JsonObject lastRefusal = lastWriteClipRefusal;
-        obj.add("lastWriteClipRefusal", lastRefusal == null ? JsonNull.INSTANCE : lastRefusal);
         JsonObject color = new JsonObject();
         color.addProperty("r", clipColor[0]);
         color.addProperty("g", clipColor[1]);

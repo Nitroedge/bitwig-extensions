@@ -17,6 +17,10 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -63,6 +67,7 @@ class MasterDeviceHandlerTest {
         assertTrue(methods.contains("masterDevice/setEnabled"));
         assertTrue(methods.contains("masterDevice/insertBitwigDevice"));
         assertTrue(methods.contains("masterDevice/insertPluginDevice"));
+        assertTrue(methods.contains("masterDevice/insertFile"));
         assertTrue(methods.contains("masterDevice/remove"));
         assertTrue(methods.contains("masterDevice/selectPage"));
         assertTrue(methods.contains("masterDevice/nextPage"));
@@ -79,8 +84,9 @@ class MasterDeviceHandlerTest {
         assertTrue(methods.contains("masterDevice/setRemoteControlValues"));
         assertTrue(methods.contains("masterDevice/getPanelParameters"));
         assertTrue(methods.contains("masterDevice/setPanelParameter"));
-        // 24 before Phase 27, plus the four remote-control page and panel parameter routes.
-        assertEquals(28, methods.size());
+        // 24 before Phase 27, plus the four remote-control page and panel parameter routes,
+        // plus Phase 29 plan 29-04's masterDevice/insertFile.
+        assertEquals(29, methods.size());
     }
 
     // --- Phase 27: parked remote-control pages and panel parameters ---
@@ -344,6 +350,147 @@ class MasterDeviceHandlerTest {
         when(mockCursorDevice.afterDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
         dispatcher.handle(rpc("masterDevice/insertBitwigDevice", "{\"name\":\"EQ-5\",\"position\":\"after\"}"));
         verify(mockInsertionPoint).insertFile(Path.of("/devices/EQ-5.bwdevice").toString());
+    }
+
+    // --- Phase 29 (29-04): masterDevice/insertFile, the master-chain twin ---
+    //
+    // The twin resolves the MASTER track's end-of-chain insertion point; everything else is the
+    // same body and the SAME shared rule (InsertFilePathValidator, D-29-23). The refusal table is
+    // mirrored rather than shared across test classes, matching how these suites are already
+    // written. Every refusal asserts the insertion point was never touched (T-29-10).
+
+    @TempDir
+    Path presetDir;
+
+    private static String jsonString(String value) {
+        return "\"" + value.replace("\\", "\\\\") + "\"";
+    }
+
+    /** A refusal must land before the Bitwig call, not after it. */
+    private void assertInsertFileRefused(String path, String expectedMessage) {
+        when(mockMasterTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+        String response = dispatcher.handle(rpc("masterDevice/insertFile",
+            "{\"path\":" + jsonString(path) + "}"));
+        assertContains(response, "-32602");
+        assertContains(response, expectedMessage);
+        verify(mockInsertionPoint, never()).insertFile(anyString());
+    }
+
+    @Test
+    void masterInsertFile_relativePath_refusedBeforeTheBitwigCall() {
+        assertInsertFileRefused("presets\\Organ Echo.bwpreset",
+            "preset file path is not absolute: ");
+    }
+
+    @Test
+    void masterInsertFile_twoBackslashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\server\\share\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_twoForwardSlashPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("//server/share/p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_backslashThenSlashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\/srv/share/p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_slashThenBackslashUncPath_refusedAsNetworkPath() {
+        assertInsertFileRefused("/\\srv\\share\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_questionMarkUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\UNC\\srv\\s\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_dotUncPrefix_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\.\\UNC\\srv\\s\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    @Test
+    void masterInsertFile_questionMarkLocalDevicePath_refusedAsNetworkPath() {
+        assertInsertFileRefused("\\\\?\\C:\\presets\\p.bwpreset",
+            "preset file path is a network path: ");
+    }
+
+    /** IN-02 generalised: a final component that is the extension and nothing else is not a name. */
+    @Test
+    void masterInsertFile_fileNamedOnlyTheExtension_refusedForItsExtension() throws IOException {
+        Path onlyExtension = Files.writeString(presetDir.resolve(".bwpreset"), "x");
+        assertInsertFileRefused(onlyExtension.toString(),
+            "preset file path does not end in .bwpreset: ");
+    }
+
+    @Test
+    void masterInsertFile_missingFile_refusedAsNotAnExistingFile() {
+        assertInsertFileRefused(presetDir.resolve("missing.bwpreset").toString(),
+            "preset file path is not an existing file: ");
+    }
+
+    @Test
+    void masterInsertFile_forwardSlashDrivePath_reachesTheMasterInsertionPointWithThePathAsGiven()
+            throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("forward.bwpreset"), "x");
+        String forwardSlashPath = preset.toString().replace('\\', '/');
+        when(mockMasterTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        String response = dispatcher.handle(rpc("masterDevice/insertFile",
+            "{\"path\":" + jsonString(forwardSlashPath) + "}"));
+
+        assertContains(response, "\"ok\"");
+        verify(mockInsertionPoint).insertFile(forwardSlashPath);
+    }
+
+    /** The twin's one difference: "end" is the MASTER track's end-of-chain insertion point. */
+    @Test
+    void masterInsertFile_defaultPosition_isTheMasterTracksEndOfDeviceChain() throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("default.bwpreset"), "x");
+        when(mockMasterTrack.endOfDeviceChainInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        dispatcher.handle(rpc("masterDevice/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + "}"));
+
+        verify(mockMasterTrack).endOfDeviceChainInsertionPoint();
+        verify(mockInsertionPoint).insertFile(preset.toString());
+    }
+
+    @Test
+    void masterInsertFile_afterPosition_reachesTheAfterDeviceInsertionPoint() throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("after.bwpreset"), "x");
+        when(mockCursorDevice.afterDeviceInsertionPoint()).thenReturn(mockInsertionPoint);
+
+        dispatcher.handle(rpc("masterDevice/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + ",\"position\":\"after\"}"));
+
+        verify(mockInsertionPoint).insertFile(preset.toString());
+    }
+
+    @Test
+    void masterInsertFile_unknownPosition_refusedBeforeAnyInsertionPointIsResolved()
+            throws IOException {
+        Path preset = Files.writeString(presetDir.resolve("sideways.bwpreset"), "x");
+
+        String response = dispatcher.handle(rpc("masterDevice/insertFile",
+            "{\"path\":" + jsonString(preset.toString()) + ",\"position\":\"sideways\"}"));
+
+        assertContains(response, "-32602");
+        // Gson escapes the message's single quotes as \u0027, so assert the quote-free parts.
+        assertContains(response, "position must be ");
+        assertContains(response, "got: sideways");
+        verify(mockMasterTrack, never()).endOfDeviceChainInsertionPoint();
+        verify(mockCursorDevice, never()).beforeDeviceInsertionPoint();
+        verify(mockCursorDevice, never()).afterDeviceInsertionPoint();
     }
 
     // --- Behavioral tests (Mockito) — Chain navigation ---

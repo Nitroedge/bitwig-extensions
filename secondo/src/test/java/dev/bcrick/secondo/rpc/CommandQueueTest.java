@@ -82,4 +82,39 @@ class CommandQueueTest {
         assertTrue(future.isDone());
         assertNull(future.get(1, TimeUnit.SECONDS));
     }
+
+    /**
+     * A deferral and a notification must be distinguishable at this seam, and this is the test
+     * that says so in one place.
+     *
+     * <p>The test above is the reason the deferral signal cannot be {@code null}: null is already
+     * spoken for. It means notification, it completes the future with null, and
+     * {@code HttpRpcServer} turns that into a bodiless HTTP 204. A null deferral would ship the
+     * caller a 204 while the write was still in flight. Both halves are asserted here together so
+     * the contrast is visible rather than spread across two classes.
+     */
+    @Test
+    void deferredRequestStaysOutstandingWhileANotificationDoesNot() throws Exception {
+        // A handler that claims its response and answers nothing now.
+        dispatcher.register("defers", params -> {
+            dispatcher.deferCurrentResponse();
+            return new JsonPrimitive("discarded");
+        });
+
+        CompletableFuture<String> deferred = queue.enqueue(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"defers\",\"id\":1}");
+        queue.drainAndExecute(dispatcher);
+        assertFalse(deferred.isDone(),
+            "a claimed response must leave its caller's future outstanding");
+
+        CompletableFuture<String> notification = queue.enqueue(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"ping\"}");
+        queue.drainAndExecute(dispatcher);
+        assertTrue(notification.isDone(), "a notification must still complete immediately");
+        assertNull(notification.get(1, TimeUnit.SECONDS));
+
+        // And the two did not get confused for one another along the way.
+        assertFalse(deferred.isDone(),
+            "the deferred future was completed by the notification draining behind it");
+    }
 }

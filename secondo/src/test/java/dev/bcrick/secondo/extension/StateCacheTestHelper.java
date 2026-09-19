@@ -97,6 +97,29 @@ public class StateCacheTestHelper {
         setField(cache, "clipCursorSceneIndex", sceneIndex);
     }
 
+    /**
+     * Sets what the launcher's has-content observer would have reported for ONE slot: the value,
+     * and the fact that it was observed at all.
+     *
+     * <p>Both, together, because they are one event in production — {@code StateCache}'s
+     * has-content lambda writes the flag in the same statement block that writes the value, so a
+     * test that could set one without the other could model a state the engine cannot reach.
+     *
+     * <p>Calling this is how a test says "this slot IS observed". NOT calling it is how a test
+     * says "no observer has fired here", which is the third state
+     * {@code MacroHandler.ClipWrite#slotWasEmpty} exists for and the one branch that had no way
+     * of being reached before plan 29-03 added the flag: the undo-on-refusal must withhold there
+     * rather than delete on a default-false reading of a primitive array.
+     *
+     * <p>Public, like {@link #setClipCursorPosition}, and for the same reason: the handler tests
+     * that need it live in {@code dev.bcrick.secondo.handlers}.
+     */
+    public static void setClipSlotContent(StateCache cache, int trackIndex, int slotIndex,
+                                          boolean hasContent) {
+        set2DArrayElement(cache, "clipHasContent", trackIndex, slotIndex, hasContent);
+        set2DArrayElement(cache, "clipHasContentObserved", trackIndex, slotIndex, true);
+    }
+
     static void setField(StateCache cache, String fieldName, Object value) {
         try {
             Field field = StateCache.class.getDeclaredField(fieldName);

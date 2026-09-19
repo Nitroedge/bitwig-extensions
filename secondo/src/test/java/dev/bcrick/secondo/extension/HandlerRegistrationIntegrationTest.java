@@ -191,6 +191,25 @@ class HandlerRegistrationIntegrationTest {
         }
     }
 
+    /**
+     * Phase 29 plan 29-04's two DIRECT-INSERT routes reach api/list through the same wiring
+     * init() uses. No method count is restated here on purpose: the comment on
+     * registersExpectedNumberOfMethods above explains that an exact count written into this class
+     * goes stale on every new RPC method and gets re-typed rather than re-derived, and
+     * apiListReturnsAllMethods already pins api/list to the dispatcher's own registry. The
+     * surface count for this phase (340 -> 342) is measured from source at the moved pin by plan
+     * 29-09/29-10, not asserted here.
+     */
+    @Test
+    void apiListContainsThePhase29Routes() {
+        String response = rpc("api/list", "{}");
+        JsonArray methods = JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonArray("result");
+        for (String name : new String[] {"device/insertFile", "masterDevice/insertFile"}) {
+            assertTrue(methods.contains(new JsonPrimitive(name)), "api/list lacks " + name);
+        }
+    }
+
     // --- Namespace presence ---
 
     @Test

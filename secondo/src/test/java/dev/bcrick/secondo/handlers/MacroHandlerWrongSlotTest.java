@@ -3,6 +3,7 @@ package dev.bcrick.secondo.handlers;
 import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.extension.StateCacheTestHelper;
+import dev.bcrick.secondo.rpc.CommandQueue;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import dev.bcrick.secondo.rpc.JsonRpcError;
 import dev.bcrick.secondo.rpc.TaskScheduler;
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -44,33 +47,62 @@ import static org.junit.jupiter.api.Assertions.*;
  * phase 2 is expressible — reproduction C of P-C-05 in miniature. Without that, a test can only
  * ever exercise the case where the cursor and the request already agree, which is the case that
  * never broke.
+ *
+ * <h2>Where a refusal is READ, since Phase 29 (plan 29-03)</h2>
+ *
+ * <p>Every assertion here that used to read the snapshot's per-refusal detail now reads the
+ * deferred RESPONSE instead, and that is a strictly better test rather than a lateral move: the
+ * response is the fact the caller actually receives, and the snapshot detail was a second copy of
+ * it that could disagree. The detail is retired (D-29-13); the COUNTER is kept, because the chain
+ * macros do not defer and it is their only machine-readable refusal signal — so both the
+ * deferring method ({@code macro/writeClip}) and a non-deferring one
+ * ({@code macro/buildSection}) still assert it here.
+ *
+ * <p>That is also why {@code macro/writeClip} is driven through {@code queue.enqueue} /
+ * {@code queue.drainAndExecute} below while {@code macro/buildSection} keeps the direct
+ * {@code dispatcher.handle} call: a deferred request HAS no returned response string, it has an
+ * outstanding future, and a chain macro has no deferral to wait for. The harness follows what the
+ * method does, and neither assertion was relaxed to make the re-point easier.
  */
 class MacroHandlerWrongSlotTest {
 
     /** Bounds {@link #drainPending()} so a scheduling bug fails loudly instead of hanging the suite. */
     private static final int MAX_DRAIN_ROUNDS = 50;
 
+    private CommandQueue queue;
     private JsonRpcDispatcher dispatcher;
     private StateCache stateCache;
     private List<String> callLog;
     private List<String> errorLog;
-    private List<Runnable> pending;
+    private List<ParkedTask> pending;
+
+    /** Virtual time, in milliseconds. Advanced by running a parked task, never by the wall clock. */
+    private long clock;
 
     /** Set by a test to make {@code clip/setNotes} fail, modelling a write that breaks on its own. */
     private boolean setNotesThrows;
 
     @BeforeEach
     void setUp() {
+        queue = new CommandQueue();
         dispatcher = new JsonRpcDispatcher();
         stateCache = new StateCache();
         callLog = new ArrayList<>();
         errorLog = new ArrayList<>();
         pending = new ArrayList<>();
+        clock = 0;
         setNotesThrows = false;
 
         // A DEFERRING scheduler. The task is parked, not run: the 100 ms window becomes a place
         // the test can stand, which is the whole point of this class.
-        TaskScheduler deferring = (task, delayMs) -> pending.add(task);
+        //
+        // Each task carries the virtual instant it comes due, so tasks run in DUE order. Without
+        // that, the 3000 ms deferral deadline plan 29-02 arms would run in the same round as a
+        // 100 ms verify hop and answer -32013 to a write that was about to be refused 2.8 seconds
+        // earlier — every refusal assertion below would fail for a reason having nothing to do
+        // with what it asserts.
+        TaskScheduler deferring =
+            (task, delayMs) -> pending.add(new ParkedTask(task, delayMs, clock + delayMs));
 
         dispatcher.register("clip/create", params -> {
             callLog.add("clip/create:t" + params.get("trackIndex").getAsInt()
@@ -84,6 +116,13 @@ class MacroHandlerWrongSlotTest {
             int slotIndex = params.get("slotIndex").getAsInt();
             callLog.add("clip/select:t" + trackIndex + "s" + slotIndex);
             StateCacheTestHelper.setClipCursorPosition(stateCache, trackIndex, slotIndex);
+            return new JsonPrimitive("ok");
+        });
+        // The undo-on-refusal route (plan 29-03). Registered so a removal that SHOULD happen can,
+        // and so a removal that should NOT happen is visible by its absence from the call log.
+        dispatcher.register("clip/delete", params -> {
+            callLog.add("clip/delete:t" + params.get("trackIndex").getAsInt()
+                + "s" + params.get("slotIndex").getAsInt());
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/setStepSize", params -> {
@@ -125,8 +164,8 @@ class MacroHandlerWrongSlotTest {
     // --- 1. The refusal itself: the case that was the data-loss bug ---
 
     @Test
-    void writeClip_refusesWhenTheCursorMovedBeforePhaseTwo() {
-        handle("macro/writeClip", """
+    void writeClip_refusesWhenTheCursorMovedBeforePhaseTwo() throws Exception {
+        CompletableFuture<String> future = enqueue("""
             {"trackIndex":0,"sceneIndex":7,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1},
                       {"x":4,"y":64,"velocity":80,"duration":1}]}""");
@@ -148,16 +187,18 @@ class MacroHandlerWrongSlotTest {
         assertFalse(callLog.contains("clip/setStepSize:0.25"),
             "the step size was written to a slot the caller did not name: " + callLog);
 
-        // And the refusal is announced, twice, both retrievable after the fact.
+        // And the refusal is announced three ways: the response the caller receives, the session
+        // counter, and the marked console line. The RESPONSE is read first, because it is the one
+        // the caller actually gets.
+        JsonObject error = errorOf(future);
+        assertEquals(JsonRpcError.CURSOR_MISMATCH, error.get("code").getAsInt());
+        JsonObject data = error.getAsJsonObject("data");
+        assertEquals(7, data.get("requestedScene").getAsInt());
+        assertEquals(5, data.get("cursorScene").getAsInt());
+        assertEquals(0, data.get("requestedTrack").getAsInt());
+        assertEquals(0, data.get("cursorTrack").getAsInt());
+
         assertEquals(1, stateCache.getWriteClipRefusals());
-        JsonObject refusal = stateCache.getLastWriteClipRefusal();
-        assertNotNull(refusal, "a refused write left nothing in the snapshot");
-        assertEquals(JsonRpcError.CURSOR_MISMATCH, refusal.get("code").getAsInt());
-        assertEquals(7, refusal.get("requestedScene").getAsInt());
-        assertEquals(5, refusal.get("observedScene").getAsInt());
-        assertEquals(0, refusal.get("requestedTrack").getAsInt());
-        assertEquals(2, refusal.get("noteCount").getAsInt());
-        assertFalse(refusal.get("timestamp").getAsString().isBlank());
 
         assertEquals(1, errorLog.size(), "expected exactly one console line: " + errorLog);
         String line = errorLog.get(0);
@@ -165,13 +206,17 @@ class MacroHandlerWrongSlotTest {
             "the console line must lead with the greppable marker: " + line);
         assertTrue(line.contains("requested=t0s7") && line.contains("observed=t0s5"),
             "the console line must carry both positions: " + line);
+        assertTrue(line.contains("notes=2"),
+            "the console line must say how many notes were at stake: " + line);
+        assertTrue(line.contains("T") && line.contains("Z"),
+            "the console line must carry its ISO-8601 timestamp: " + line);
     }
 
     // --- 2. The control: it still writes when nothing moved ---
 
     @Test
-    void writeClip_writesWhenTheCursorAgrees() {
-        String response = handle("macro/writeClip", """
+    void writeClip_writesWhenTheCursorAgrees() throws Exception {
+        CompletableFuture<String> future = enqueue("""
             {"trackIndex":2,"sceneIndex":3,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1},
                       {"x":4,"y":64,"velocity":80,"duration":1}],
@@ -186,7 +231,7 @@ class MacroHandlerWrongSlotTest {
             "clip/setNotes:2",
             "clip/rename:Lead"
         ), callLog);
-        assertEquals(2, parseResult(response).get("count").getAsInt());
+        assertEquals(2, resultOf(future).get("count").getAsInt());
         assertEquals(0, stateCache.getWriteClipRefusals());
         assertTrue(errorLog.isEmpty(), "a clean write should say nothing: " + errorLog);
     }
@@ -194,19 +239,22 @@ class MacroHandlerWrongSlotTest {
     // --- 3. A write that was correctly targeted and still failed reads differently ---
 
     @Test
-    void writeClip_reportsAWriteFailureDistinctlyFromAMismatch() {
+    void writeClip_reportsAWriteFailureDistinctlyFromAMismatch() throws Exception {
         setNotesThrows = true;
 
-        handle("macro/writeClip", """
+        CompletableFuture<String> future = enqueue("""
             {"trackIndex":1,"sceneIndex":1,"lengthBeats":4,"stepSize":0.5,
              "notes":[{"x":0,"y":48,"velocity":100,"duration":1}]}""");
         drainPending();
 
-        JsonObject refusal = stateCache.getLastWriteClipRefusal();
-        assertNotNull(refusal);
-        assertEquals(JsonRpcError.NOTE_WRITE_FAILED, refusal.get("code").getAsInt(),
+        JsonObject error = errorOf(future);
+        assertEquals(JsonRpcError.NOTE_WRITE_FAILED, error.get("code").getAsInt(),
             "a broken write must not be reported as a cursor mismatch");
-        assertEquals("SECONDO-NOTE-WRITE-FAILED", refusal.get("marker").getAsString());
+        assertEquals("clip is not writable",
+            error.getAsJsonObject("data").get("reason").getAsString(),
+            "the cause belongs in the answer — 'it failed' is not a diagnosis");
+        assertEquals(1, stateCache.getWriteClipRefusals());
+
         assertEquals(1, errorLog.size());
         assertTrue(errorLog.get(0).startsWith("SECONDO-NOTE-WRITE-FAILED"), errorLog.get(0));
         assertTrue(errorLog.get(0).contains("clip is not writable"),
@@ -217,6 +265,8 @@ class MacroHandlerWrongSlotTest {
 
     @Test
     void buildSection_abortsTheChainOnTheFirstMismatch() {
+        // Direct, not through the queue: a chain macro does not defer (D-29-05), so its refusal
+        // reaches no response and the captured console log IS where it is readable.
         handle("macro/buildSection", """
             {"sceneName":"Verse","sceneIndex":0,"clips":[
                 {"trackIndex":0,"lengthBeats":8,"stepSize":0.25,
@@ -238,6 +288,8 @@ class MacroHandlerWrongSlotTest {
 
         assertEquals(1, callLog.stream().filter(c -> c.startsWith("clip/setNotes")).count(),
             "the chain wrote past its first mismatch: " + callLog);
+        // The KEPT counter, on the method that has nothing else: this is why D-29-13 retired the
+        // detail and not the tally.
         assertEquals(1, stateCache.getWriteClipRefusals());
 
         assertEquals(1, errorLog.size(), errorLog.toString());
@@ -253,10 +305,10 @@ class MacroHandlerWrongSlotTest {
     void writeClip_secondWriteDoesNotTouchTheCursorUntilTheFirstHasFinished() {
         // Two commands drained from the queue in the same flush — the ordinary case, not a
         // contrived one: CommandQueue.drainAndExecute runs every queued request back to back.
-        handle("macro/writeClip", """
+        enqueue("""
             {"trackIndex":0,"sceneIndex":0,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1}]}""");
-        handle("macro/writeClip", """
+        enqueue("""
             {"trackIndex":3,"sceneIndex":4,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":72,"velocity":100,"duration":1}]}""");
 
@@ -285,11 +337,11 @@ class MacroHandlerWrongSlotTest {
     // --- 6. The -1 sentinel: a cursor nothing has ever observed is not track 0 ---
 
     @Test
-    void writeClip_refusesWhenTheCursorPositionWasNeverObserved() {
+    void writeClip_refusesWhenTheCursorPositionWasNeverObserved() throws Exception {
         // The state a fresh extension is in before any observer has fired. The request names
         // track 0 scene 0, which is what an unguarded `-1` would read as if the sentinel were 0.
         dispatcher.register("clip/selectSilently", params -> new JsonPrimitive("ok"));
-        handle("macro/writeClip", """
+        CompletableFuture<String> future = enqueue("""
             {"trackIndex":0,"sceneIndex":0,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1}]}""");
 
@@ -303,6 +355,13 @@ class MacroHandlerWrongSlotTest {
         assertEquals(1, stateCache.getWriteClipRefusals());
         assertTrue(errorLog.get(0).contains("observed=unobserved(t-1s-1)"),
             "an unobserved cursor must not be reported as a real slot: " + errorLog.get(0));
+
+        // And the sentinel does not leave the engine: the caller is told JSON null, not -1.
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertTrue(data.get("cursorTrack").isJsonNull(),
+            "the -1 sentinel reached the caller as a track number: " + data);
+        assertTrue(data.get("cursorScene").isJsonNull(),
+            "the -1 sentinel reached the caller as a scene number: " + data);
     }
 
     // --- 7. Expressions are a third hop, and land on the clip their notes did ---
@@ -333,21 +392,70 @@ class MacroHandlerWrongSlotTest {
 
     // --- Helpers ---
 
+    /** Drive a NON-deferring method and read the response string it returns. */
     private String handle(String method, String params) {
         return dispatcher.handle(
             "{\"jsonrpc\":\"2.0\",\"method\":\"" + method + "\",\"params\":" + params + ",\"id\":1}");
     }
 
-    private JsonObject parseResult(String response) {
+    /**
+     * Drive {@code macro/writeClip} the way production does, and hand back the future the caller
+     * is waiting on. A deferred request has no returned response string to read.
+     */
+    private CompletableFuture<String> enqueue(String params) {
+        CompletableFuture<String> future = queue.enqueue(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"macro/writeClip\",\"params\":" + params
+                + ",\"id\":1}");
+        queue.drainAndExecute(dispatcher);
+        return future;
+    }
+
+    private JsonObject resultOf(CompletableFuture<String> future) throws Exception {
+        String response = future.get(1, TimeUnit.SECONDS);
+        assertNotNull(response, "a deferred response must never complete with null");
         return JsonParser.parseString(response).getAsJsonObject().getAsJsonObject("result");
     }
 
-    /** Run exactly the tasks parked right now; anything they schedule waits for the next round. */
+    private JsonObject errorOf(CompletableFuture<String> future) throws Exception {
+        String response = future.get(1, TimeUnit.SECONDS);
+        assertNotNull(response, "a deferred response must never complete with null");
+        JsonObject parsed = JsonParser.parseString(response).getAsJsonObject();
+        assertTrue(parsed.has("error"), "expected a refusal, got: " + response);
+        return parsed.getAsJsonObject("error");
+    }
+
+    /** One parked task: the runnable, the delay it was scheduled with, and when it comes due. */
+    private static final class ParkedTask {
+        final Runnable task;
+        final long delayMs;
+        final long dueAt;
+
+        ParkedTask(Runnable task, long delayMs, long dueAt) {
+            this.task = task;
+            this.delayMs = delayMs;
+            this.dueAt = dueAt;
+        }
+    }
+
+    /** Run the earliest-due batch of parked tasks; anything they schedule waits for a later round. */
     private void runPendingOnce() {
-        List<Runnable> round = new ArrayList<>(pending);
-        pending.clear();
-        for (Runnable task : round) {
-            task.run();
+        if (pending.isEmpty()) {
+            return;
+        }
+        long earliest = Long.MAX_VALUE;
+        for (ParkedTask task : pending) {
+            earliest = Math.min(earliest, task.dueAt);
+        }
+        List<ParkedTask> round = new ArrayList<>();
+        for (ParkedTask task : pending) {
+            if (task.dueAt == earliest) {
+                round.add(task);
+            }
+        }
+        pending.removeAll(round);
+        clock = Math.max(clock, earliest);
+        for (ParkedTask task : round) {
+            task.task.run();
         }
     }
 
