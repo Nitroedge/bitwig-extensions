@@ -10,9 +10,28 @@ public class CommandQueue {
     /**
      * Enqueue a JSON-RPC request from a network thread.
      * Returns a future that will be completed on the session thread.
+     *
+     * <p>The command is STAMPED here with {@code System.nanoTime()}, because this is the instant
+     * the request arrived and therefore the instant the caller's own five-second wall started.
+     * Everything downstream that has to promise an answer inside that wall measures from this
+     * stamp and never from the moment the handler happened to run (29-REVIEW.md, WR-04). See
+     * {@link RpcCommand#getEnqueuedNanos()} and {@link JsonRpcDispatcher#remainingBudgetMs()}.
      */
     public CompletableFuture<String> enqueue(String requestJson) {
-        RpcCommand command = new RpcCommand(requestJson);
+        long enqueuedNanos = System.nanoTime();
+        return enqueue(requestJson, enqueuedNanos);
+    }
+
+    /**
+     * Enqueue with an explicit arrival stamp.
+     *
+     * <p>Package-private and visible for tests ONLY. A test that needs to express "this command
+     * waited two seconds in the queue" must be able to back-date the stamp: the alternative is a
+     * sleep, and a suite whose assertions are satisfied by wall-clock time passing is a suite that
+     * goes flaky under load rather than one that measures anything.
+     */
+    CompletableFuture<String> enqueue(String requestJson, long enqueuedNanos) {
+        RpcCommand command = new RpcCommand(requestJson, enqueuedNanos);
         queue.add(command);
         return command.getResponseFuture();
     }
@@ -36,7 +55,11 @@ public class CommandQueue {
         RpcCommand command;
         while ((command = queue.poll()) != null) {
             try {
-                String response = dispatcher.handle(command.getRequestJson());
+                // The arrival stamp travels with the request, so a handler deciding whether
+                // it can honour a deferral reads the budget that is actually left on the
+                // CALLER'S wall rather than the one its own execution started with (WR-04).
+                String response = dispatcher.handle(
+                    command.getRequestJson(), command.getEnqueuedNanos());
                 if (JsonRpcDispatcher.isDeferred(response)) {
                     dispatcher.bindDeferred(command);
                 } else {

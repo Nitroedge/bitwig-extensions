@@ -80,9 +80,35 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.7",
+            "0.2.8",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.7 (secondo Phase 29 deferrable RPC responses, plan "
+            "The engine's version is 0.2.8 (secondo Phase 31 cursor identity verify, plan "
+                + "31-10; bumped from 0.2.7 because this build changes wire behaviour and "
+                + "diagnose's version row must be able to tell it from the build before it, and a "
+                + "SHA is not something a caller can ask the DAW for. A LAUNCHER WRITE NOW PROVES "
+                + "THE SLOT IT IS ON instead of comparing a position that can be observed stale: "
+                + "stampThenProve writes a token through the cursor clip and proveStampEcho asks "
+                + "the NAMED slot's own launcher-fed name observer whether it arrived, on an "
+                + "observation newer than the stamp, with restoreStampedName putting the prior "
+                + "name back when it did not and publishing stampRestored and stampLeftAt as "
+                + "facts; the refusal carries refusalReason so a caller can tell which of the two "
+                + "triggers fired -- cursor-position or stamp-echo. The emptiness that decides "
+                + "whether a refused write may remove the clip it created is now a conjunction of "
+                + "FOUR facts, all addressed by the resolved bank slot and dated by the job's own "
+                + "observation tick, published as slotObservedAt (an explicit null when nothing "
+                + "ever observed the slot); clipCreated is THREE-STATE, so an unproven creation "
+                + "reaches the wire as an absence rather than as a false answer, and three new "
+                + "leftoverReason values say which proof was missing. A DEFERRAL IS NOW PROMISED "
+                + "AGAINST THE CALLER'S OWN WALL: CommandQueue stamps enqueuedNanos, the "
+                + "dispatcher publishes the remaining budget, and a write that cannot finish "
+                + "inside WRITE_WORST_CASE_MS of what is left declines with the third deferReason "
+                + "value, late, rather than claiming a response it cannot complete. Every "
+                + "expression field the note collection dereferences is refused synchronously "
+                + "before the claim, naming the field and the note index; a fractional or "
+                + "overflowing parked remote-control index is a named -32602 instead of a "
+                + "successful write to another control; and clip/select's non-forced guard reads "
+                + "emptiness at the canonical bank slot. 0.2.7 was secondo Phase 29 deferrable "
+                + "RPC responses, plan "
                 + "29-08; bumped from 0.2.6 because this build changes wire behaviour and "
                 + "diagnose's version row must be able to tell it from the build before it, and a "
                 + "SHA is not something a caller can ask the DAW for. THREE LAUNCHER-WRITE CODES "

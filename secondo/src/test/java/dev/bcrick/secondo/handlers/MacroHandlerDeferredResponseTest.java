@@ -4,6 +4,7 @@ import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
 import dev.bcrick.secondo.extension.StateCacheTestHelper;
 import dev.bcrick.secondo.rpc.CommandQueue;
+import dev.bcrick.secondo.rpc.CommandQueueTestHelper;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import dev.bcrick.secondo.rpc.JsonRpcError;
 import dev.bcrick.secondo.rpc.TaskScheduler;
@@ -85,6 +86,17 @@ class MacroHandlerDeferredResponseTest {
      */
     private long clock;
 
+
+    /**
+     * Where the modelled cursor is, so the cursor-scoped {@code clip/rename} stub can publish into
+     * the slot it actually landed on. {@code -1} is "never selected", the sentinel
+     * {@link StateCache} uses for a position no observer has reported.
+     */
+    private int cursorTrack;
+
+    /** The slot half of {@link #cursorTrack}. */
+    private int cursorSlot;
+
     /** Set by a test to make {@code clip/create} fail, so {@code startNextJob}'s own catch fires. */
     private boolean clipCreateThrows;
 
@@ -93,6 +105,16 @@ class MacroHandlerDeferredResponseTest {
 
     /** Set by a test to make {@code clip/delete} fail, so a removal that was tried can miss. */
     private boolean clipDeleteThrows;
+
+    /**
+     * Set by a test to withhold the has-content observation a landed {@code clip/create} produces.
+     *
+     * <p>It models the one-flush-stale state 29-REVIEW.md WR-01 is about: the create reached the
+     * launcher and the observer has not reported it yet. The handler's freshness rule is what
+     * decides what to do about that, so a harness with no way to express it could only ever test
+     * the case where the rule is satisfied.
+     */
+    private boolean clipCreateObservationLags;
 
     @BeforeEach
     void setUp() {
@@ -106,6 +128,15 @@ class MacroHandlerDeferredResponseTest {
         clipCreateThrows = false;
         setNotesThrows = false;
         clipDeleteThrows = false;
+        clipCreateObservationLags = false;
+        cursorTrack = -1;
+        cursorSlot = -1;
+        // The engine resolves every public track index to a physical bank slot through one
+        // TrackBankManager (D-31-06), and a cache without one answers -1 -- unproven -- to all of
+        // them, which would refuse every write here. Production wires one in during
+        // initialization; a null bank resolves each in-range index to itself.
+        StateCacheTestHelper.installTrackBankManager(stateCache,
+            new TrackBankManager(null, StateCacheTestHelper.trackCountOf(StateCache.class)));
 
         // A DEFERRING scheduler: the task is parked, not run. The flush window becomes a place
         // the test can stand, which is what makes "the future is not done yet" assertable.
@@ -119,12 +150,24 @@ class MacroHandlerDeferredResponseTest {
         TaskScheduler deferring =
             (task, delayMs) -> pending.add(new ParkedTask(task, delayMs, clock + delayMs));
 
+        // STATEFUL since plan 31-05, and for the reason the rename stub below is: a create that
+        // LANDS is reported by the slot's own has-content observer, and a harness that does not
+        // model that half cannot express the difference between a create that did something and
+        // one Bitwig treated as a no-op. Two facts about API v25 are modelled here, both measured
+        // rather than assumed: a create over an OCCUPIED slot changes nothing and publishes
+        // nothing (29-LIVE-ACCEPTANCE.md section 3), and a create over an empty one flips the
+        // slot's has-content and raises its observation sequence.
         dispatcher.register("clip/create", params -> {
             if (clipCreateThrows) {
                 throw new IllegalStateException("slot is not writable");
             }
-            callLog.add("clip/create:t" + params.get("trackIndex").getAsInt()
-                + "s" + params.get("slotIndex").getAsInt());
+            int createTrack = params.get("trackIndex").getAsInt();
+            int createSlot = params.get("slotIndex").getAsInt();
+            callLog.add("clip/create:t" + createTrack + "s" + createSlot);
+            if (!clipCreateObservationLags && !stateCache.clipHasContent(createTrack, createSlot)) {
+                StateCacheTestHelper.setClipSlotContent(stateCache, createTrack, createSlot, true);
+                StateCacheTestHelper.bumpClipObservationSeq(stateCache, createTrack, createSlot);
+            }
             return new JsonPrimitive("ok");
         });
         // STATEFUL: selecting a clip moves the modelled cursor, and the verify reads it.
@@ -133,6 +176,8 @@ class MacroHandlerDeferredResponseTest {
             int slotIndex = params.get("slotIndex").getAsInt();
             callLog.add("clip/select:t" + trackIndex + "s" + slotIndex);
             StateCacheTestHelper.setClipCursorPosition(stateCache, trackIndex, slotIndex);
+            cursorTrack = trackIndex;
+            cursorSlot = slotIndex;
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/setStepSize", params -> {
@@ -157,8 +202,17 @@ class MacroHandlerDeferredResponseTest {
                 + "s" + params.get("slotIndex").getAsInt());
             return new JsonPrimitive("ok");
         });
+        // Cursor-scoped, AND the route the identity proof of plan 31-04 is taken through: the
+        // named slot's own name observer publishes what the rename wrote. Without that half no
+        // stamp could echo and every write in this class would refuse for a reason none of these
+        // tests is about.
         dispatcher.register("clip/rename", params -> {
-            callLog.add("clip/rename:" + params.get("name").getAsString());
+            String name = params.get("name").getAsString();
+            callLog.add("clip/rename:" + name);
+            if (cursorTrack >= 0 && cursorSlot >= 0) {
+                StateCacheTestHelper.setClipSlotName(stateCache, cursorTrack, cursorSlot, name);
+                StateCacheTestHelper.bumpClipObservationSeq(stateCache, cursorTrack, cursorSlot);
+            }
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/setChance", params -> {
@@ -362,7 +416,9 @@ class MacroHandlerDeferredResponseTest {
                 + "},\"id\":1}");
         queue.drainAndExecute(dispatcher);
 
-        // Let the notes land, then move the cursor before the expression hop runs.
+        // Let the notes land, then move the cursor before the expression hop runs. TWO rounds
+        // since plan 31-04: the first stamps the clip, the second proves the echo and writes.
+        runPendingOnce();
         runPendingOnce();
         assertTrue(callLog.contains("clip/setNotes:1"), "the notes never landed: " + callLog);
         StateCacheTestHelper.setClipCursorPosition(stateCache, 0, 5);
@@ -389,6 +445,12 @@ class MacroHandlerDeferredResponseTest {
 
     @Test
     void writeClip_deadlineAnswersWithWriteUnresolvedWhenTheVerifyNeverRan() throws Exception {
+        // The slot is observed and observed EMPTY, which is the state every in-range slot is in
+        // once a project is open: Bitwig fires every has-content observer at init. Stated here
+        // because this case asserts clipCreated below, and from plan 31-05 that key answers what
+        // was MEASURED -- an unobserved slot would make it an honest null rather than a true.
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, false);
+
         CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
         queue.drainAndExecute(dispatcher);
         assertFalse(future.isDone());
@@ -438,9 +500,12 @@ class MacroHandlerDeferredResponseTest {
         CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
         queue.drainAndExecute(dispatcher);
 
-        // The verify hop runs and the write succeeds, well inside the deadline.
+        // The verify hop and the identity proof run and the write succeeds, well inside the
+        // deadline. Two rounds since plan 31-04, for the reason given in test 8.
         runPendingOnce();
-        assertTrue(future.isDone(), "the write should have completed on its first verify");
+        runPendingOnce();
+        assertTrue(future.isDone(),
+            "the write should have completed on its verify and its identity proof");
         String answered = future.get(1, TimeUnit.SECONDS);
         assertFalse(JsonParser.parseString(answered).getAsJsonObject().has("error"));
 
@@ -510,6 +575,224 @@ class MacroHandlerDeferredResponseTest {
             "a request that could not defer still armed a deadline: " + parkedDelays());
         assertEquals(List.of(FLUSH_MS), parkedDelays(),
             "the write itself must still be scheduled — only the deadline is absent");
+    }
+
+    // --- 12b. The caller's OWN clock decides whether a deferral can be promised (WR-04) ---
+
+    /**
+     * A write that arrived nearly five seconds ago is not promised an answer it cannot deliver.
+     *
+     * <p>THE TWO CLOCKS, which is the whole of WR-04. {@code HttpRpcServer}'s
+     * {@code future.get(5000)} and the Python client's {@code read=5.0} both start when the
+     * request ARRIVES. A handler starts only once the command has waited for the next
+     * {@code flush()}. Before plan 31-06 the deadline was armed off the handler's start, so a
+     * request that had already spent four and a half seconds in the queue was still promised three
+     * more -- and the caller collected that as a bodiless HTTP 500 with no id, which D-29-06 calls
+     * strictly worse than an answer that arrives at once and says the outcome is not yet known.
+     *
+     * <p>Nothing sleeps: the arrival stamp is supplied through {@link CommandQueueTestHelper}, so
+     * "this arrived 4.6 seconds ago" is a number the test chose rather than time it waited out.
+     */
+    @Test
+    void writeClip_withTooLittleOfTheCallersWallLeftDeclinesTheDeferralAndSaysLate()
+            throws Exception {
+        CompletableFuture<String> future = CommandQueueTestHelper.enqueueAsOf(queue,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"macro/writeClip\",\"params\":"
+                + writeParams(0, 7, TWO_NOTES) + ",\"id\":1}",
+            CommandQueueTestHelper.arrivedMsAgo(4600));
+        queue.drainAndExecute(dispatcher);
+
+        assertTrue(future.isDone(),
+            "a write with less of its own wall left than the write path can take was still"
+                + " promised a later answer; the caller would collect that as a bodiless timeout");
+        JsonObject result = resultOf(future);
+        assertFalse(result.get("deferred").getAsBoolean());
+        assertEquals("late", result.get("deferReason").getAsString(),
+            "the three declining paths must be told apart by the VALUE, not by prose");
+        assertEquals(2, result.get("count").getAsInt(),
+            "the declining answer keeps the pre-Phase-29 accepted count");
+
+        // THE CLAIM WAS NEVER MADE, asserted rather than inferred from the answer: a deadline is
+        // armed exactly when a deferral was taken, so nothing is parked but the write's own hop.
+        assertEquals(List.of(FLUSH_MS), parkedDelays(),
+            "a declined request armed a deadline it has no response to answer: " + parkedDelays());
+
+        // And declining the DEFERRAL is not declining the WRITE.
+        drainPending();
+        assertTrue(callLog.contains("clip/setNotes:2"), "the queued write never ran: " + callLog);
+    }
+
+    /**
+     * A wall that is PARTLY spent shortens the deadline instead of declining, and the answer says
+     * which deadline it was actually measured against.
+     *
+     * <p>The controlled middle case between the two extremes above: 3000 ms of the wall gone
+     * leaves 1500 once the safety margin is held back -- more than the write path's worst case, so
+     * the deferral is still honest, but less than the standing deadline, so the standing deadline
+     * is not what gets armed. {@code DEFERRAL_DEADLINE_MS} itself is untouched at 3000; what
+     * changed is the clock it is compared against.
+     */
+    @Test
+    void writeClip_onAPartlySpentWallArmsTheShorterDeadlineAndReportsIt() throws Exception {
+        CompletableFuture<String> future = CommandQueueTestHelper.enqueueAsOf(queue,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"macro/writeClip\",\"params\":"
+                + writeParams(0, 7, TWO_NOTES) + ",\"id\":1}",
+            CommandQueueTestHelper.arrivedMsAgo(3000));
+        queue.drainAndExecute(dispatcher);
+
+        assertFalse(future.isDone(), "there was budget enough to defer and the write did not");
+        assertEquals(0, countParkedAt(DEADLINE_MS),
+            "the standing 3000 ms deadline was armed on a wall that had 1500 ms left: "
+                + parkedDelays());
+
+        long armed = parkedDelays().stream().filter(d -> d != FLUSH_MS).findFirst().orElse(-1L);
+        assertTrue(armed >= 1400 && armed <= 1500,
+            "the armed deadline should be the wall less the margin less the measured wait,"
+                + " about 1500 ms; parked delays were " + parkedDelays());
+
+        runPendingAt(armed);
+        JsonObject error = errorOf(future);
+        assertEquals(JsonRpcError.WRITE_UNRESOLVED, error.get("code").getAsInt());
+        assertEquals(armed, error.getAsJsonObject("data").get("deadlineMs").getAsLong(),
+            "the answer must report the deadline it was ACTUALLY measured against, not the"
+                + " standing constant: a caller told 3000 after 1500 has been lied to");
+    }
+
+    // --- 12c. One malformed payload no longer kills the write path for the session (WR-05) ---
+    //
+    // Two halves, both asserted below. The STRONGER one is
+    // MacroHandler#validateExpressionFields, which refuses a malformed payload in the handler
+    // before the deferral is claimed and before anything is queued. The WEAKER one is the guard
+    // now wrapping collectNoteExpressions, which catches the same class of throw on the chain
+    // route that validateExpressionFields deliberately does not stand in front of -- so the
+    // backstop has something real to catch rather than being unreachable by construction.
+
+    /**
+     * An absent {@code repeat.curve} is a parameter error about ONE FIELD OF ONE NOTE, answered
+     * in the same drain, with nothing promised and nothing queued.
+     *
+     * <p>THE READ THAT USED TO THROW. {@code collectNoteExpressions} does
+     * {@code repeat.get("curve").getAsDouble()} with no check at all. Before plan 31-06 that
+     * NullPointerException happened on a scheduled task, inside no guard, so no terminal path ran
+     * at all -- see the next test for what that cost.
+     */
+    @Test
+    void writeClip_withAnAbsentRepeatCurveIsRefusedSynchronouslyNamingTheFieldAndTheNote()
+            throws Exception {
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, NOTE_WITH_CURVELESS_REPEAT, 1);
+        queue.drainAndExecute(dispatcher);
+
+        assertTrue(future.isDone(),
+            "a malformed payload was accepted and the caller was left waiting for it");
+        JsonObject error = errorOf(future);
+        assertEquals(-32602, error.get("code").getAsInt(),
+            "a malformed parameter must be an INVALID_PARAMS error, not a three-second"
+                + " WRITE_UNRESOLVED saying the write may have landed");
+        String message = error.get("message").getAsString();
+        assertTrue(message.contains("repeat.curve"),
+            "the refusal must name the field that was wrong: " + message);
+        assertTrue(message.contains("note 0"),
+            "the refusal must name the note that was wrong: " + message);
+        assertTrue(message.contains("missing 'repeat.curve' parameter"),
+            "the refusal must reuse the project's own missing-parameter wording: " + message);
+
+        // NO DEFERRAL WAS CLAIMED AND NO JOB WAS ENQUEUED. Both are asserted against observable
+        // effects: a claimed deferral leaves the future outstanding, and an enqueued job runs
+        // phase 1 synchronously and parks its verify hop.
+        assertEquals(List.of(), parkedDelays(),
+            "a refused payload still queued work: " + parkedDelays());
+        assertEquals(List.of(), callLog,
+            "a refused payload still reached Bitwig: " + callLog);
+    }
+
+    /** The same refusal for a container that is not an object, through the same one wording. */
+    @Test
+    void writeClip_withANonObjectExpressionsContainerIsRefusedTheSameWay() throws Exception {
+        CompletableFuture<String> future = enqueueWriteClip(0, 7,
+            "[{\"x\":0,\"y\":60,\"velocity\":100,\"duration\":1,\"expressions\":\"loud\"}]", 1);
+        queue.drainAndExecute(dispatcher);
+
+        assertTrue(future.isDone());
+        JsonObject error = errorOf(future);
+        assertEquals(-32602, error.get("code").getAsInt());
+        String message = error.get("message").getAsString();
+        assertTrue(message.contains("note 0") && message.contains("'expressions'")
+            && message.contains("must be an object"), message);
+        assertEquals(List.of(), parkedDelays(), "a refused payload still queued work");
+        assertEquals(List.of(), callLog, "a refused payload still reached Bitwig: " + callLog);
+    }
+
+    /**
+     * THE ASSERTION THAT PINS THE ACTUAL DEFECT: an ordinary write AFTER a refusal still works.
+     *
+     * <p>WR-05 is not about the first failure. It is about every write after it. The unguarded
+     * throw left {@code writeInProgress} latched true, so from that moment on every
+     * {@code macro/writeClip} hit the queue-busy front door, declined its deferral, and joined a
+     * queue that never drained again -- for the rest of the session. A test that asserted only
+     * that the bad payload was refused would have passed against the broken engine too.
+     */
+    @Test
+    void writeClip_afterAMalformedPayloadIsRefusedTheNextOrdinaryWriteStillSucceeds()
+            throws Exception {
+        CompletableFuture<String> refused = enqueueWriteClip(0, 7, NOTE_WITH_CURVELESS_REPEAT, 1);
+        queue.drainAndExecute(dispatcher);
+        assertEquals(-32602, errorOf(refused).get("code").getAsInt());
+
+        CompletableFuture<String> good = enqueueWriteClip(0, 7, TWO_NOTES, 2);
+        queue.drainAndExecute(dispatcher);
+
+        // Still outstanding, which is the observable form of "the write path is free": a latched
+        // in-progress flag would have made this answer at once with deferReason queue-busy.
+        assertFalse(good.isDone(),
+            "the write after the refusal could not even claim a deferral, which is what a latched"
+                + " writeInProgress looks like from outside");
+        drainPending();
+        JsonObject result = resultOf(good);
+        assertEquals(2, result.get("count").getAsInt(),
+            "the write after the refusal never landed: " + callLog);
+        assertTrue(result.get("deferred").getAsBoolean());
+        assertTrue(callLog.contains("clip/setNotes:2"), "the notes never reached the cursor: "
+            + callLog);
+    }
+
+    /**
+     * A throw from INSIDE the collection runs a terminal path, and the write path survives it.
+     *
+     * <p>Driven through {@code macro/buildSection}, which reaches the same
+     * {@code collectNoteExpressions} on the same job driver and is deliberately NOT covered by
+     * {@code handleWriteClip}'s new front-door validation -- so the backstop half of WR-05's fix
+     * has something real to catch. Without the guard, the NullPointerException escapes every
+     * terminal path, {@code finishJob} never runs, and the assertions at the end of this test are
+     * the ones that fail.
+     */
+    @Test
+    void collectionFailureRoutesToTheWriteFailurePathAndLeavesTheWritePathUsable()
+            throws Exception {
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"macro/buildSection\",\"params\":{"
+            + "\"sceneName\":\"Verse\",\"sceneIndex\":3,\"clips\":["
+            + "{\"trackIndex\":0,\"lengthBeats\":8,\"stepSize\":0.25,\"notes\":"
+            + NOTE_WITH_CURVELESS_REPEAT + "}"
+            + "]},\"id\":10}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        // A TERMINAL PATH RAN. failJob is the only place this marker is written, so its presence
+        // is proof the throw was caught by the guard rather than escaping the scheduled task.
+        assertTrue(errorLog.stream().anyMatch(line -> line.startsWith("SECONDO-NOTE-WRITE-FAILED")),
+            "the collection's throw escaped every terminal path: " + errorLog);
+        assertTrue(callLog.contains("clip/setNotes:1"),
+            "the notes should have landed before the collection was even reached: " + callLog);
+
+        // AND THE FLAG IS CLEAR. writeInProgress is private, so this is asserted against the one
+        // observable it controls: the queue-busy front door. A later write that can still claim a
+        // deferral is a write that found the flag false and the queue empty.
+        CompletableFuture<String> later = enqueueWriteClip(1, 2, TWO_NOTES, 11);
+        queue.drainAndExecute(dispatcher);
+        assertFalse(later.isDone(),
+            "the write path was left latched busy: the next write could not claim a deferral");
+        drainPending();
+        assertEquals(2, resultOf(later).get("count").getAsInt(),
+            "the write after the collection failure never landed: " + callLog);
     }
 
     // --- 13. THE UNDO: a refusal leaves no clip behind at a slot it proved empty (23-UAT test 1) ---
@@ -599,13 +882,241 @@ class MacroHandlerDeferredResponseTest {
         drainPending();
 
         JsonObject data = errorOf(future).getAsJsonObject("data");
-        assertTrue(data.get("clipCreated").getAsBoolean());
+        // Corrected by plan 31-05, and the correction is the point rather than a concession: the
+        // create WAS dispatched here, but over a slot nobody had observed, so whether it created
+        // anything is exactly as unproven as the emptiness was. It used to answer true (IN-05).
+        assertTrue(data.get("clipCreated").isJsonNull(),
+            "an unprovable emptiness cannot license a provable creation: " + data);
         assertFalse(data.get("clipRemoved").getAsBoolean(),
             "the undo ran on a slot whose emptiness was never observed: " + data);
         assertTrue(data.get("leftoverReason").getAsString().contains("never observed"),
             "an unprovable slot must say that it was unprovable: " + data);
         assertFalse(callLog.stream().anyMatch(c -> c.startsWith("clip/delete")),
             "clip/delete was dispatched on an unproven observation: " + callLog);
+    }
+
+    // --- 15a. WR-02: an unresolvable coordinate is UNPROVEN, and is never slot zero ---
+
+    /**
+     * The coordinate the undo addresses and the coordinate its evidence came from must be one
+     * coordinate.
+     *
+     * <p>Track 0 resolves to bank slot 0 under the resolver this class installs, and t0s7 is
+     * observed EMPTY here -- so a read that fell through to slot zero when the resolution failed
+     * would find "empty", believe it, and delete. {@code slotWasEmpty} must be null instead. This
+     * is the shape of WR-02 that a green mock suite could never catch, because the mock resolves
+     * canonically and the engine did not.
+     */
+    @Test
+    void refusedWriteLeavesTheClipWhenTheCoordinateCannotBeResolved() throws Exception {
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, false);
+        StateCacheTestHelper.installTrackBankManager(stateCache, null);
+        assertEquals(-1, stateCache.resolveCanonicalBankSlot(0),
+            "this test's premise is that the coordinate cannot be resolved");
+        assertFalse(stateCache.clipHasContent(0, 7),
+            "and that slot zero would still answer EMPTY to anything that fell through to it");
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertFalse(data.get("clipRemoved").getAsBoolean(),
+            "the undo ran on an unresolvable coordinate: " + data);
+        assertTrue(data.get("leftoverReason").getAsString().contains("could not be resolved"),
+            "an unresolvable coordinate must say so rather than borrow another slot's reason: "
+                + data);
+        assertFalse(callLog.stream().anyMatch(c -> c.startsWith("clip/delete")),
+            "minus one fell through to slot zero and a clip was deleted on it: " + callLog);
+        assertTrue(data.get("slotObservedAt").isJsonNull(),
+            "there was no slot to observe, so the freshness of the evidence is an absence: "
+                + data);
+    }
+
+    // --- 15b. WR-01: an observation that predates the write proves nothing about it ---
+
+    /**
+     * The defect D-29-11 named and plan 29-03 did not close.
+     *
+     * <p>{@code clipHasContentObserved} is set once and never cleared, and Bitwig fires every
+     * slot's has-content observer at init -- so after startup "this slot has been observed" is
+     * permanently true for every in-range slot and cannot distinguish a current reading from a
+     * one-flush-stale one. The staleness here is constructed with the helper rather than waited
+     * for: the slot is observed BEFORE the write begins and the create's own observation is
+     * withheld, so the only observation on record predates the job.
+     */
+    @Test
+    void refusedWriteLeavesTheClipWhenTheOnlyObservationPredatesTheWrite() throws Exception {
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, false);
+        StateCacheTestHelper.bumpClipObservationSeq(stateCache, 0, 7);
+        long observedAt = stateCache.getClipObservationSeqAtBankSlot(0, 7);
+        assertTrue(observedAt > 0, "the premise is an observation that EXISTS");
+
+        // The create reaches the launcher and the observer has not reported it. Nothing lands on
+        // this slot after the write begins, so nothing can date the reading above to this write.
+        clipCreateObservationLags = true;
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertFalse(data.get("clipRemoved").getAsBoolean(),
+            "the undo deleted on an observation older than the write itself: " + data);
+        assertTrue(data.get("leftoverReason").getAsString().contains("only before this write"),
+            "a stale reading must say it is stale, not that it was never taken: " + data);
+        assertFalse(callLog.stream().anyMatch(c -> c.startsWith("clip/delete")),
+            "clip/delete was dispatched on a stale observation: " + callLog);
+        assertEquals(observedAt, data.get("slotObservedAt").getAsLong(),
+            "the answer must say WHEN its evidence was taken, not assert that it was fresh: "
+                + data);
+    }
+
+    // --- 15c. And it deletes when the launcher speaks about the slot AFTER the write began ---
+
+    @Test
+    void refusedWriteRemovesTheClipWhenTheSlotIsObservedAgainAfterTheWriteBegan() throws Exception {
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, false);
+        StateCacheTestHelper.bumpClipObservationSeq(stateCache, 0, 7);
+        long observedAt = stateCache.getClipObservationSeqAtBankSlot(0, 7);
+        long tickBeforeTheWrite = stateCache.currentObservationTick();
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        // The create landed on an empty slot, so the launcher reported that slot again. That
+        // report is the fourth fact, and it is the only one of the four this case does not share
+        // with 15b -- which is what makes the pair a controlled difference rather than two
+        // scenarios that happen to disagree.
+        assertTrue(stateCache.getClipObservationSeqAtBankSlot(0, 7) > tickBeforeTheWrite,
+            "the create's own has-content observation never landed, so this case is not the"
+                + " fresh one it claims to be");
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertTrue(data.get("clipRemoved").getAsBoolean(),
+            "a reading proven current by the launcher's own report still did not authorise the"
+                + " undo: " + data);
+        assertTrue(data.get("leftoverReason").isJsonNull(),
+            "nothing was left, so there is no reason to give: " + data);
+        assertTrue(callLog.contains("clip/delete:t0s7"),
+            "the clip this write created was not removed: " + callLog);
+        assertEquals(observedAt, data.get("slotObservedAt").getAsLong(),
+            "slotObservedAt reports when the READING was taken, which is before the create:"
+                + " " + data);
+    }
+
+    // --- 15d. The freshness key is an absence, never a zero that reads as an observation ---
+
+    @Test
+    void refusalPublishesSlotObservedAtAsAnAbsenceWhenNothingEverObservedTheSlot()
+            throws Exception {
+        assertEquals(0, stateCache.getClipObservationSeqAtBankSlot(0, 7),
+            "zero is the cache's internal spelling of never-observed, and this is that state");
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertTrue(data.has("slotObservedAt"),
+            "the key is ALWAYS present, like every other fact in this payload: " + data);
+        assertTrue(data.get("slotObservedAt").isJsonNull(),
+            "a zero would read as a real, very old observation rather than as the absence of"
+                + " one: " + data);
+    }
+
+    // --- 15e. IN-05: clipCreated answers what was MEASURED, in three states ---
+
+    /**
+     * The flag stops claiming more than it measured.
+     *
+     * <p>Live step 5 of 29-LIVE-ACCEPTANCE.md established that {@code createEmptyClip} over an
+     * occupied slot is a no-op at API v25: it is acknowledged and changes nothing. The flag was
+     * set {@code true} on any dispatch that did not throw, so a refusal aimed at a slot holding
+     * the owner's material reported that this write had created a clip there. Three cases, one
+     * per state, and the value is derived from {@code slotWasEmpty} in all three.
+     */
+    @Test
+    void createdIsTrueWhenTheSlotWasProvenEmptyAndTheCreateLanded() throws Exception {
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, false);
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertTrue(data.get("clipCreated").getAsBoolean(),
+            "a create over a slot proven empty did make a clip, and the answer must say so: "
+                + data);
+        assertTrue(stateCache.clipHasContent(0, 7),
+            "and the launcher agrees a clip is there now");
+    }
+
+    @Test
+    void createdIsFalseWhenTheSlotWasProvenOccupiedAndTheCreateWasANoOp() throws Exception {
+        // Observed, and observed to HOLD CONTENT. The dispatch is acknowledged and does nothing.
+        StateCacheTestHelper.setClipSlotContent(stateCache, 0, 7, true);
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        assertTrue(callLog.contains("clip/create:t0s7"),
+            "the dispatch must still HAPPEN -- this case is about what it did, not whether it"
+                + " was sent: " + callLog);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertFalse(data.get("clipCreated").isJsonNull(),
+            "this one IS proven, and a proven negative is a false and not an absence: " + data);
+        assertFalse(data.get("clipCreated").getAsBoolean(),
+            "a create Bitwig treated as a no-op was reported as a creation: " + data);
+        assertTrue(data.get("leftoverReason").getAsString().contains("no clip was created"),
+            "the reason must say the create made nothing, not merely that nothing was removed: "
+                + data);
+        assertFalse(callLog.stream().anyMatch(c -> c.startsWith("clip/delete")),
+            "clip/delete was dispatched against an occupied slot: " + callLog);
+    }
+
+    @Test
+    void createdIsAnAbsenceWhenTheEmptinessCouldNotBeProven() throws Exception {
+        // Nothing has ever observed t0s7, so the emptiness answer is null -- and a creation
+        // derived from an unproven emptiness is unproven too.
+        assertFalse(stateCache.clipHasContentObserved(0, 7),
+            "this case's premise is an unprovable slot");
+
+        CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
+        queue.drainAndExecute(dispatcher);
+        queue.enqueue("{\"jsonrpc\":\"2.0\",\"method\":\"clip/select\","
+            + "\"params\":{\"trackIndex\":0,\"slotIndex\":5,\"force\":true},\"id\":99}");
+        queue.drainAndExecute(dispatcher);
+        drainPending();
+
+        JsonObject data = errorOf(future).getAsJsonObject("data");
+        assertTrue(data.has("clipCreated"),
+            "the key is ALWAYS present, like every other fact in this payload: " + data);
+        assertTrue(data.get("clipCreated").isJsonNull(),
+            "an unproven creation must be an absence, never a false -- 'no clip was created' and"
+                + " 'nobody can say' are different facts: " + data);
+        assertFalse(callLog.stream().anyMatch(c -> c.startsWith("clip/delete")),
+            "the undo ran on an unproven slot: " + callLog);
     }
 
     // --- 16. The write-failure path removes nothing, even from a slot proven empty ---
@@ -674,7 +1185,9 @@ class MacroHandlerDeferredResponseTest {
                 + "},\"id\":1}");
         queue.drainAndExecute(dispatcher);
 
-        // Let the notes land, then move the cursor before the expression hop runs.
+        // Let the notes land, then move the cursor before the expression hop runs. TWO rounds
+        // since plan 31-04: the first stamps the clip, the second proves the echo and writes.
+        runPendingOnce();
         runPendingOnce();
         assertTrue(callLog.contains("clip/setNotes:1"), "the notes never landed: " + callLog);
         StateCacheTestHelper.setClipCursorPosition(stateCache, 0, 5);
@@ -695,6 +1208,15 @@ class MacroHandlerDeferredResponseTest {
     }
 
     // --- Helpers ---
+
+    /**
+     * One note whose {@code repeat} block is missing {@code curve} -- the first of WR-05's three
+     * worked examples, and the one whose raw read is a bare
+     * {@code repeat.get("curve").getAsDouble()}.
+     */
+    private static final String NOTE_WITH_CURVELESS_REPEAT =
+        "[{\"x\":0,\"y\":60,\"velocity\":100,\"duration\":1,"
+            + "\"repeat\":{\"count\":3,\"velocityEnd\":0.5,\"velocityCurve\":0.0}}]";
 
     private static final String TWO_NOTES =
         "[{\"x\":0,\"y\":60,\"velocity\":100,\"duration\":1},"

@@ -575,4 +575,81 @@ class ParkedRemoteControlsTest {
             "[{\"pageIndex\":1,\"params\":[7]}]",
             "each param must be an object, got 7");
     }
+
+    // --- non-integral and overflowing indexes (WR-06) ---
+    //
+    // The WR-10 guards above proved only that the field IS a number. getAsInt then narrowed it
+    // without complaint and the range check that follows PASSED on the narrowed value, so the
+    // call wrote to a control the caller never named: WR-06's three worked examples are
+    // pageIndex 1.5 becoming page 1, index 2.9 becoming control 2, and pageIndex 4294967297
+    // becoming 1 through Long.parseLong and the (int) cast. That is the drifted write T-27-22
+    // refuses, reached through input validation rather than through a moved cursor.
+    //
+    // Every case below asserts the FIELD NAME in the message, because "a -32602 naming the field
+    // that was wrong" is the stated goal these guards were added for, and a refusal that merely
+    // refuses does not meet it. assertInvalidParams also asserts the exact exception class and
+    // that NO control on any page was written.
+
+    @Test
+    void writeValues_aFractionalPageIndexIsRefusedByNameRatherThanTruncatedToAnotherPage() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":1.5,\"params\":[{\"index\":0,\"value\":0.5}]}]",
+            "'pageIndex' must be an integer, got 1.5");
+    }
+
+    @Test
+    void writeValues_aFractionalParameterIndexIsRefusedByNameRatherThanTruncatedToAnotherControl() {
+        observePageCount(4);
+        parkAll();
+        assertInvalidParams(
+            "[{\"pageIndex\":1,\"params\":[{\"index\":2.9,\"value\":0.5}]}]",
+            "'index' must be an integer, got 2.9");
+    }
+
+    @Test
+    void writeValues_aPageIndexPastTheIntegerRangeIsRefusedByNameRatherThanWrappedToAnotherPage() {
+        observePageCount(4);
+        parkAll();
+        // 2^32 + 1. The old path narrowed this to 1 -- a REACHABLE page, so nothing downstream
+        // could have caught it.
+        assertInvalidParams(
+            "[{\"pageIndex\":4294967297,\"params\":[{\"index\":0,\"value\":0.5}]}]",
+            "'pageIndex' must be an integer, got 4294967297");
+    }
+
+    @Test
+    void writeValues_aParameterIndexPastTheIntegerRangeIsRefusedByNameRatherThanWrappedToAnotherControl() {
+        observePageCount(4);
+        parkAll();
+        // Narrowed to 1 by the (int) cast, which is inside 0-7, so the range check passed too.
+        assertInvalidParams(
+            "[{\"pageIndex\":1,\"params\":[{\"index\":4294967297,\"value\":0.5}]}]",
+            "'index' must be an integer, got 4294967297");
+    }
+
+    /**
+     * THE CONTROLLED OPPOSITE. An integral value written with a decimal point was accepted by
+     * {@code getAsInt} before this check existed, so it must still be accepted after it: WR-06 is
+     * a refusal that was MISSING, not a permission being withdrawn, and a check that also refuses
+     * previously-valid input would be a different change wearing this one's name.
+     */
+    @Test
+    void writeValues_anIntegralIndexWrittenWithADecimalPointIsStillAcceptedAndStillWrites() {
+        observePageCount(4);
+        parkAll();
+        for (PageFixture fixture : fixtures) clearInvocations(fixture.selected);
+
+        JsonObject result = parked.writeValues(payload(
+            "[{\"pageIndex\":1.0,\"params\":[{\"index\":2.0,\"value\":0.75}]}]"));
+
+        assertTrue(result.get("ok").getAsBoolean());
+        assertEquals(1, result.get("pageCount").getAsInt());
+        assertEquals(1, result.get("paramCount").getAsInt());
+        verify(fixtures[1].values[2]).setImmediately(0.75);
+        verify(fixtures[0].values[2], never()).setImmediately(anyDouble());
+        verify(fixtures[2].values[2], never()).setImmediately(anyDouble());
+        for (PageFixture fixture : fixtures) verify(fixture.selected, never()).set(anyInt());
+    }
 }

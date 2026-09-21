@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static dev.bcrick.secondo.extension.StateCacheTestHelper.sceneCountOf;
+import static dev.bcrick.secondo.extension.StateCacheTestHelper.setClipSlotContent;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
@@ -754,6 +755,71 @@ class ClipHandlerTest {
 
         verify(slotTwoBank).launch(0);
         verify(slotOneTrack, never()).clipLauncherSlotBank();
+    }
+
+    // --- Phase 31: clip/select's non-forced emptiness guard reads the canonical bank slot ---
+    //
+    // The same defect class as 29-REVIEW.md's WR-02, one route over. clip/select's non-forced
+    // branch asked StateCache whether the slot was empty using the CALLER'S PUBLIC track index,
+    // while clipHasContent is subscripted by PHYSICAL BANK SLOT -- and the select it guards
+    // resolves the public index through TrackBankManager. Under the identity mapping the two
+    // agree, which is why this survived; under a collapsed group or a scrolled bank the guard
+    // answers about a different track from the one it is guarding.
+    //
+    // Both cases below use the SAME non-identity mapping and differ only in WHICH slot holds the
+    // content, so together they pin the coordinate rather than merely the outcome: a guard that
+    // had simply been deleted would pass the first and fail the second.
+
+    /** The non-identity fixture these two cases share: public index 1 resolves to bank slot 2. */
+    private ClipLauncherSlot selectFixtureUnderNonIdentityMapping(JsonRpcDispatcher local,
+                                                                  StateCache cache) {
+        TrackBankManager manager = new TrackBankManager(mockTrackBank, 8);
+        manager.observeCanonicalExists(0, true);
+        manager.observeCanonicalExists(1, false);
+        manager.observeCanonicalExists(2, true);
+
+        Track slotOneTrack = mock(Track.class);
+        Track slotTwoTrack = mock(Track.class);
+        ClipLauncherSlotBank slotTwoBank = mock(ClipLauncherSlotBank.class);
+        ClipLauncherSlot slotTwoSlot = mock(ClipLauncherSlot.class);
+        when(mockTrackBank.getItemAt(1)).thenReturn(slotOneTrack);
+        when(mockTrackBank.getItemAt(2)).thenReturn(slotTwoTrack);
+        when(slotTwoTrack.clipLauncherSlotBank()).thenReturn(slotTwoBank);
+        when(slotTwoBank.getItemAt(0)).thenReturn(slotTwoSlot);
+
+        new ClipHandler(manager, mockSceneBank, mockCursorClip, cache).register(local);
+        return slotTwoSlot;
+    }
+
+    @Test
+    void clipSelect_underNonIdentityMapping_readsEmptinessAtTheCanonicalBankSlot() {
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        StateCache cache = new StateCache();
+        ClipLauncherSlot slot = selectFixtureUnderNonIdentityMapping(local, cache);
+        // The content is at BANK SLOT 2 -- the slot public index 1 resolves to, and the slot the
+        // select addresses. The raw subscript (1) is left unobserved and therefore empty.
+        setClipSlotContent(cache, 2, 0, true);
+
+        String response = local.handle(rpc("clip/select", "{\"trackIndex\":1,\"slotIndex\":0}"));
+
+        assertContains(response, "\"ok\"");
+        verify(slot).select();
+    }
+
+    @Test
+    void clipSelect_underNonIdentityMapping_refusesWhenOnlyTheRawSubscriptHasContent() {
+        JsonRpcDispatcher local = new JsonRpcDispatcher();
+        StateCache cache = new StateCache();
+        ClipLauncherSlot slot = selectFixtureUnderNonIdentityMapping(local, cache);
+        // Content at the RAW subscript only. The canonical bank slot 2 is empty, so the select
+        // must be refused -- the old guard read bank slot 1 here and let it through.
+        setClipSlotContent(cache, 1, 0, true);
+
+        String response = local.handle(rpc("clip/select", "{\"trackIndex\":1,\"slotIndex\":0}"));
+
+        assertContains(response, "-32602");
+        assertContains(response, "slot is empty");
+        verify(slot, never()).select();
     }
 
     // --- Helpers ---

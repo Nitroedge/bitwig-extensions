@@ -21,6 +21,16 @@ class MacroHandlerTest {
     private List<String> callLog;
     private StateCache stateCache;
 
+    /**
+     * Where the modelled cursor is, so the cursor-scoped {@code clip/rename} stub can publish into
+     * the slot it actually landed on. {@code -1} is "never selected", the sentinel
+     * {@link StateCache} uses for a position no observer has reported.
+     */
+    private int cursorTrack;
+
+    /** The slot half of {@link #cursorTrack}. */
+    private int cursorSlot;
+
     /** Runs scheduled tasks immediately — simulates instant flush cycles for testing. */
     private static final TaskScheduler IMMEDIATE_SCHEDULER = (task, delayMs) -> task.run();
 
@@ -29,6 +39,14 @@ class MacroHandlerTest {
         dispatcher = new JsonRpcDispatcher();
         callLog = new ArrayList<>();
         stateCache = new StateCache();
+        cursorTrack = -1;
+        cursorSlot = -1;
+        // The engine resolves every public track index to a physical bank slot through one
+        // TrackBankManager (D-31-06), and a cache without one answers -1 -- unproven -- to all of
+        // them, which would refuse every write here. Production wires one in during
+        // initialization; a null bank resolves each in-range index to itself.
+        StateCacheTestHelper.installTrackBankManager(stateCache,
+            new TrackBankManager(null, StateCacheTestHelper.trackCountOf(StateCache.class)));
 
         // Register stub handlers that log calls
         dispatcher.register("track/createAudio", params -> {
@@ -68,6 +86,8 @@ class MacroHandlerTest {
             // IMMEDIATE_SCHEDULER collapses the flush window to zero, so the move is instant here;
             // MacroHandlerWrongSlotTest is where the window is a place a test can stand.
             StateCacheTestHelper.setClipCursorPosition(stateCache, trackIndex, slotIndex);
+            cursorTrack = trackIndex;
+            cursorSlot = slotIndex;
             return new JsonPrimitive("ok");
         });
         dispatcher.register("clip/setStepSize", params -> {
@@ -79,8 +99,18 @@ class MacroHandlerTest {
             callLog.add("clip/setNotes:" + count);
             return new JsonPrimitive(count);
         });
+        // Cursor-scoped, AND the route the identity proof of plan 31-04 is taken through: the
+        // named slot's own name observer publishes what the rename wrote, and without that half
+        // modelled here no stamp could echo and every write in this class would refuse. The
+        // scheduler collapses the flush window to zero in this class, so the publication is
+        // instant -- MacroHandlerWrongSlotTest is where it can be made to lag.
         dispatcher.register("clip/rename", params -> {
-            callLog.add("clip/rename:" + params.get("name").getAsString());
+            String name = params.get("name").getAsString();
+            callLog.add("clip/rename:" + name);
+            if (cursorTrack >= 0 && cursorSlot >= 0) {
+                StateCacheTestHelper.setClipSlotName(stateCache, cursorTrack, cursorSlot, name);
+                StateCacheTestHelper.bumpClipObservationSeq(stateCache, cursorTrack, cursorSlot);
+            }
             return new JsonPrimitive("ok");
         });
         dispatcher.register("scene/create", params -> {
@@ -486,12 +516,17 @@ class MacroHandlerTest {
             {"trackIndex":0,"sceneIndex":1,"lengthBeats":8,"stepSize":0.25,
              "notes":[{"x":0,"y":60,"velocity":100,"duration":1},
                       {"x":4,"y":64,"velocity":80,"duration":1}]}""");
-        // Phase 1: create + select; Phase 2 (deferred): setStepSize + setNotes
+        // Phase 1: create + select; Phase 2 (deferred): the identity stamp, then -- once the
+        // named slot has echoed it -- setStepSize + setNotes, and the stamp put back. This write
+        // names no clip, so the name the slot carried before the stamp is restored rather than
+        // leaving an engine token as the owner's clip name.
         assertEquals(List.of(
             "clip/create:t0s1l8",
             "clip/select:t0s1",
+            "clip/rename:SECONDO-STAMP-1-c0",
             "clip/setStepSize:0.25",
-            "clip/setNotes:2"
+            "clip/setNotes:2",
+            "clip/rename:"
         ), callLog);
     }
 
@@ -504,6 +539,7 @@ class MacroHandlerTest {
         assertEquals(List.of(
             "clip/create:t0s0l4",
             "clip/select:t0s0",
+            "clip/rename:SECONDO-STAMP-1-c0",
             "clip/setStepSize:0.5",
             "clip/setNotes:1",
             "clip/rename:Bass Line"
@@ -587,10 +623,12 @@ class MacroHandlerTest {
             "clip/create:t0s0l16",
             "clip/create:t1s0l16",
             "clip/select:t0s0",
+            "clip/rename:SECONDO-STAMP-1-c0",
             "clip/setStepSize:0.25",
             "clip/setNotes:1",
             "clip/rename:Lead",
             "clip/select:t1s0",
+            "clip/rename:SECONDO-STAMP-2-c1",
             "clip/setStepSize:0.25",
             "clip/setNotes:1",
             "clip/rename:Bass"
@@ -644,10 +682,12 @@ class MacroHandlerTest {
             "clip/create:t0s2l16",
             "clip/create:t1s2l16",
             "clip/select:t0s2",
+            "clip/rename:SECONDO-STAMP-1-c0",
             "clip/setStepSize:0.25",
             "clip/setNotes:1",
             "clip/rename:Lead",
             "clip/select:t1s2",
+            "clip/rename:SECONDO-STAMP-2-c1",
             "clip/setStepSize:0.25",
             "clip/setNotes:1",
             "clip/rename:Bass"

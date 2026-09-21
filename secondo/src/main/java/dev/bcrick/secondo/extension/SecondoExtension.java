@@ -184,6 +184,7 @@ public class SecondoExtension extends ControllerExtension {
 
         // Register all observers into StateCache
         stateCache.registerObservers(transport, trackBank, masterTrack, application, project);
+        stateCache.setTrackBankManager(trackBankManager);
         stateCache.registerClipObservers(trackBank);
         stateCache.registerDeviceObservers(cursorTrack, cursorDevice, remoteControlsPage);
         stateCache.registerClipCursorObservers(cursorClip, cursorTrack);

@@ -2,6 +2,7 @@ package dev.bcrick.secondo.handlers;
 
 import com.google.gson.*;
 import dev.bcrick.secondo.extension.StateCache;
+import dev.bcrick.secondo.rpc.JsonParamValidator;
 import dev.bcrick.secondo.rpc.JsonRpcDispatcher;
 import dev.bcrick.secondo.rpc.JsonRpcError;
 import dev.bcrick.secondo.rpc.PendingResponse;
@@ -33,6 +34,25 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
  * re-polls to {@link #CURSOR_VERIFY_CEILING_MS}, and writes only on a match. A mismatch is
  * refused -- never retried onto a different slot, never written with a warning.
  *
+ * <p>WHAT IS TRUE FROM PHASE 31. That compare is kept, unchanged and at its own ceiling, but it
+ * is no longer the whole proof -- because it can AGREE AND BE WRONG. At a competing selection
+ * about a hundred milliseconds into a write, the cursor clip has already re-pointed while the
+ * observers still report where phase 1 put it: the compare matches, the notes go to the new
+ * cursor clip, an empty unnamed clip is left at the slot the caller named, and the engine
+ * classifies the whole thing as a success. {@code 31-ECHO-MEASUREMENT.md}'s 100 ms row is that
+ * outcome measured against a running Bitwig, with the response positively claiming
+ * {@code landed: t7s4} while the notes were at {@code t7s5}.
+ *
+ * <p>So the compare is now the cheap filter in FRONT of an identity proof, and the proof changes
+ * both the moment it is taken and the witness that takes it. Before any note is dispatched, a
+ * unique token is written through the cursor and the NAMED SLOT'S OWN name observer -- a witness
+ * fed by the launcher, completely independent of the cursor -- must report that exact token on an
+ * observation newer than the stamp. Only then do the step size and the notes go out. The proof
+ * comes BEFORE the notes, so a failure has written none anywhere and the existing refusal and
+ * undo apply unchanged; and because the stamp is itself a rename of a clip whose identity is not
+ * yet proven, every slot name is snapshotted first and put back when the proof fails. See
+ * {@link #stampThenProve}, {@link #proveStampEcho} and {@link #restoreStampedName}.
+ *
  * <h2>What {@code ok} means here, exactly</h2>
  *
  * <p>WHAT WAS TRUE UNTIL PHASE 29, kept because the paragraph that was believed is half of the
@@ -45,14 +65,18 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
  * Session thread ({@code CommandQueue.java:20-22}), and {@code host.scheduleTask} schedules onto
  * that SAME thread. A handler that blocked on its own deferred verify would block the flush that
  * the verify is waiting for -- a deadlock, not a slow path. Making the RPC response itself
- * completable after the handler returns is Phase 29 ("Engine: Deferrable RPC Responses"), which
- * will emit {@link JsonRpcError#CURSOR_MISMATCH} / {@link JsonRpcError#NOTE_WRITE_FAILED} in the
- * response. Until then a refusal is announced two ways, both retrievable:
+ * completable after the handler returns was DEFERRED TO Phase 29 ("Engine: Deferrable RPC
+ * Responses"), which since the fourteenth build-pin move emits
+ * {@link JsonRpcError#CURSOR_MISMATCH} / {@link JsonRpcError#NOTE_WRITE_FAILED} in the response.
+ * Until it did, a refusal was announced two ways, both retrievable:
  *
  * <ul>
  *   <li>a {@code host.errorln} line marked {@value #MARKER_CURSOR_MISMATCH} or
- *       {@value #MARKER_NOTE_WRITE_FAILED}, with an ISO-8601 timestamp and both positions; and</li>
- *   <li>{@code writeClipRefusals} / {@code lastWriteClipRefusal} in the snapshot's clip section.</li>
+ *       {@value #MARKER_NOTE_WRITE_FAILED}, with an ISO-8601 timestamp and both positions -- and
+ *       these SURVIVE UNCHANGED, for the reason the paragraph below gives; and</li>
+ *   <li>{@code writeClipRefusals} in the snapshot's clip section, and beside it the per-refusal
+ *       detail that Phase 29 retired. The counter was kept and the detail went; the paragraph
+ *       below says which was which and why.</li>
  * </ul>
  * </blockquote>
  *
@@ -75,6 +99,22 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
  * machine-readable refusal signal -- which is why it is a counter that stayed and a detail that
  * went. See {@code StateCache#recordWriteClipRefusal}.
  *
+ * <p>WHAT IS TRUE FROM PHASE 31 about that response. The refusal it carries now has TWO triggers
+ * rather than one, and the response says which of them fired: the cheap position compare
+ * disagreed ({@code refusalReason} reading {@code cursor-position}), or it agreed and the
+ * identity proof behind it did not ({@code stamp-echo}). Both are the same clean refusal -- one
+ * terminal path, one code, one undo -- because what Phase 31 added is a TRIGGER and not an
+ * OUTCOME (D-31-07). The proof itself is the stamp described at the top of this class: a unique
+ * token written through the cursor BEFORE any note is dispatched, and required back from the
+ * named slot's OWN name observer -- a witness fed by the launcher and wholly independent of the
+ * cursor -- on an observation newer than the stamp. Its budget,
+ * {@link #STAMP_ECHO_CEILING_MS}, is the echo measured against a running Bitwig in
+ * {@code 31-ECHO-MEASUREMENT.md} (one flush, 125 ms) plus one flush of headroom, which is why it
+ * is a constant of its own rather than a share of {@link #CURSOR_VERIFY_CEILING_MS}. And because
+ * the stamp is a rename taken on a clip whose identity is not yet proven, the refusal also says
+ * what became of it, in {@code stampRestored} and {@code stampLeftAt} -- both explicit nulls
+ * where nothing was stamped, or where the put-back could not be proven.
+ *
  * <p>WHAT A REFUSAL DOES TO THE SLOT (plan 29-03). {@code refuseJob} removes the clip this job
  * created, and only when the named slot was proven empty before the creation -- in range, and
  * observed, and observed empty. Anything it cannot prove it LEAVES, and says why in
@@ -82,6 +122,27 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
  * slotIndex)} through {@code clip/delete} and never by the cursor, because the refusal IS that
  * the cursor is somewhere else. {@code failJob} removes nothing at all: a write that failed may
  * have written something.
+ *
+ * <p>WHAT IS TRUE FROM PHASE 31, PLAN 05, about the paragraph above. "Proven empty before the
+ * creation" gained a FOURTH fact and lost a coordinate ambiguity. Every fact is now read at the
+ * RESOLVED physical bank slot -- the one the create dispatched into and the one the delete will
+ * address -- rather than at the caller's public track index, which is a different track the
+ * moment the bank is scrolled or a group is collapsed (29-REVIEW.md, WR-02). And the reading is
+ * no longer accepted on its own age: {@code settleSlotEvidence} requires the launcher to have
+ * reported that slot on an observation NEWER than the instant the job began, because Bitwig
+ * fires every slot's has-content observer at init and a merely-present observation is therefore
+ * the permanent state of every in-range slot (WR-01, D-29-11). The reading is still taken before
+ * the create -- it can be taken nowhere else -- but it is dated there and proven later. Anything
+ * it cannot prove still resolves to leaving the clip and saying why.
+ *
+ * <p>{@code clipCreated} was corrected in the same pass and for the same reason. It used to be
+ * set {@code true} on any {@code clip/create} that did not throw, and at API v25 a create over an
+ * occupied slot is acknowledged and changes nothing -- so a refusal aimed at a slot holding the
+ * owner's material reported that this write had created a clip there (29-REVIEW.md, IN-05). It is
+ * now DERIVED from the emptiness answer: true where the slot was proven empty, false where it was
+ * proven occupied, and an explicit JSON null where the emptiness could not be proven, because a
+ * create that may or may not have happened is a third state and collapsing it into false is the
+ * same misreport one size smaller.
  *
  * <p>Deferral is deliberately NOT universal. It is taken only when
  * {@code JsonRpcDispatcher#deferralAvailable()} says so -- never for a notification, never inside
@@ -126,6 +187,43 @@ public class MacroHandler {
     private static final long CURSOR_VERIFY_CEILING_MS = 250;
 
     /**
+     * The prefix every identity stamp carries.
+     *
+     * <p>A stamp is a real rename of a real clip, so the name it writes has to explain itself if a
+     * crash ever leaves one visible: it says which program wrote it, and the sequence and clip
+     * index after it say which write. It is deliberately NOT derived from the caller's own final
+     * name -- a caller writing one name to two clips would otherwise make a collision read as a
+     * proof (D-31-04).
+     */
+    private static final String STAMP_PREFIX = "SECONDO-STAMP-";
+
+    /**
+     * How long the identity proof may wait for the NAMED SLOT'S OWN name observer to echo the
+     * stamp before the write is refused.
+     *
+     * <p>SIZED FROM A MEASUREMENT. {@code 31-ECHO-MEASUREMENT.md} recorded
+     * {@code echo_flushes: 1} and {@code echo_elapsed_ms: 125} against a running Bitwig at this
+     * pin: a cursor-scoped {@code clip/rename} reached the slot's own published name on the FIRST
+     * look. This is that measured flush count plus one flush of headroom -- two polls, at
+     * {@link #FLUSH_DELAY_MS} and at twice it -- because a figure taken once on a quiet session is
+     * a latency, not a guarantee.
+     *
+     * <p>IT IS ITS OWN BUDGET, and that is the point. {@link #CURSOR_VERIFY_CEILING_MS} is
+     * deliberately untouched at 250 (D-31-03): the position compare in front of this proof is
+     * live-proven at the 0 / 30 / 60 ms delays and re-polling it further changes nothing, so this
+     * phase ADDS a proof rather than widening one. Sharing that counter would also have left the
+     * proof whatever the compare had not already spent, which makes a budget an accident of
+     * another step's luck.
+     *
+     * <p>Capped so a proven clip still costs under 400 ms (D-31-10): one hop to the verify, at
+     * most two to the echo, one for the expression pass.
+     *
+     * <p>Exhausting it REFUSES, exactly as the compare's ceiling does. It is not a timeout after
+     * which the write proceeds hopefully.
+     */
+    private static final long STAMP_ECHO_CEILING_MS = 200;
+
+    /**
      * How long a DEFERRED {@code macro/writeClip} response may stay outstanding before it is
      * answered with {@link JsonRpcError#WRITE_UNRESOLVED} rather than left to run into a
      * transport wall.
@@ -156,6 +254,34 @@ public class MacroHandler {
     private static final long DEFERRAL_DEADLINE_MS = 3000;
 
     /**
+     * The longest a lone {@code macro/writeClip} can take to reach a terminal answer, in
+     * milliseconds. A deferral cannot honestly be claimed with less than this left on the caller's
+     * wall.
+     *
+     * <p>DERIVED BY ADDITION, NEVER WRITTEN AS A LITERAL, and that is the point of it. The figure
+     * is the sum of three budgets this class already declares, so a plan that widens any one of
+     * them moves this with it instead of leaving a stale number that reads like a measurement:
+     *
+     * <ul>
+     *   <li>{@link #CURSOR_VERIFY_CEILING_MS} -- the position compare, including the hop that
+     *       reaches it and the re-polls it pays for;</li>
+     *   <li>{@link #STAMP_ECHO_CEILING_MS} -- the identity proof plan 31-04 added AFTER
+     *       {@link #DEFERRAL_DEADLINE_MS}'s own arithmetic was written down, which is why that
+     *       comment's "300 ms" is a smaller number than this one; and</li>
+     *   <li>one further {@link #FLUSH_DELAY_MS} for whichever hop comes last -- the expression
+     *       pass on a success, or the name restore in front of a refusal (plan 31-04).</li>
+     * </ul>
+     *
+     * <p>WALKED AGAINST THE ACTUAL CHAIN, so the sum is a bound rather than a hope. The deepest
+     * path is: phase 1 synchronously at 0; the verify hop at 100; a second compare at 200, which
+     * is the last the ceiling allows; the stamp goes out there and the echo is polled at 300 and
+     * at 400, which is the last the echo ceiling allows; and one closing hop at 500 for the
+     * restore-and-refuse or for the expressions. 500 measured, 550 budgeted.
+     */
+    private static final long WRITE_WORST_CASE_MS =
+        CURSOR_VERIFY_CEILING_MS + STAMP_ECHO_CEILING_MS + FLUSH_DELAY_MS;
+
+    /**
      * The message {@link JsonRpcError#WRITE_UNRESOLVED} travels with.
      *
      * <p>This is NOT a greppable console marker and no third marker was added: the two that exist
@@ -175,6 +301,19 @@ public class MacroHandler {
 
     /** Greppable marker for a launcher write that was correctly targeted and still failed. */
     static final String MARKER_NOTE_WRITE_FAILED = "SECONDO-NOTE-WRITE-FAILED";
+
+    /**
+     * {@code refusalReason} when the cheap pre-write position compare never agreed.
+     *
+     * <p>The two reasons are a DISCRIMINATOR on one outcome, not two outcomes. A refusal is a
+     * refusal: same code, same undo, same response shape, same terminal path. This key exists so a
+     * caller can tell which of the two triggers fired without the engine having to invent a second
+     * refusal to carry the difference.
+     */
+    private static final String REFUSAL_CURSOR_POSITION = "cursor-position";
+
+    /** {@code refusalReason} when the position compare agreed and the identity proof did not. */
+    private static final String REFUSAL_STAMP_ECHO = "stamp-echo";
 
     /**
      * The scene bank window width, used by {@link #handleBuildSection} to convert an absolute
@@ -200,6 +339,13 @@ public class MacroHandler {
     /** Queued launcher writes. Drained one at a time; see the class comment on serialisation. */
     private final Deque<WriteJob> writeQueue = new ArrayDeque<>();
     private boolean writeInProgress;
+
+    /**
+     * Monotonic per-handler counter behind every stamp token, so no two stamps in a session can
+     * collide. One handler exists per extension instance, and everything that touches this runs on
+     * the one Control Surface Session thread.
+     */
+    private long stampSeq;
 
     /**
      * The production constructor.
@@ -349,6 +495,13 @@ public class MacroHandler {
         String name = params.has("name") && !params.get("name").isJsonNull()
             ? params.get("name").getAsString() : null;
 
+        // BEFORE the deferral is claimed and before anything is queued (29-REVIEW.md, WR-05).
+        // A malformed expression field is a parameter error and must answer as one, here, where
+        // the response still belongs to this call stack. Once a deferral is claimed the same fact
+        // could only travel as a three-second -32013 saying the write MAY have landed; once the
+        // job is queued it could not travel at all.
+        validateExpressionFields(notes);
+
         // Queue the whole write -- clip creation, cursor move, verify, notes, expressions -- as one
         // job. Phase 1 runs inside the job rather than here so that a second writeClip arriving in
         // the same flush cannot move the cursor out from under a write already in its verify
@@ -375,23 +528,48 @@ public class MacroHandler {
         boolean queueBusy = writeInProgress || !writeQueue.isEmpty();
         boolean deferrable = dispatcher.deferralAvailable();
 
+        // THE LATE FRONT DOOR (29-REVIEW.md, WR-04), evaluated on the caller's clock rather than
+        // on this handler's.
+        //
+        // remainingBudgetMs() is the caller's five-second wall, minus a stated margin, minus how
+        // long this request has ALREADY been alive -- and it has been alive since it arrived, not
+        // since this method started. Behind a slow flush or a chain that has just drained, most of
+        // that wall can be gone before the first line here runs.
+        //
+        // With less than WRITE_WORST_CASE_MS left, a deferral would be a promise this engine can
+        // be sure it cannot keep, and the caller would collect it as a bodiless HTTP 500 with no
+        // id -- strictly worse than an answer that arrives at once and says the outcome is not yet
+        // known (D-29-06). So it is DECLINED, the same way and through the same key the busy queue
+        // declines, with a value that names lateness.
+        long remainingBudgetMs = dispatcher.remainingBudgetMs();
+        boolean tooLate = remainingBudgetMs < WRITE_WORST_CASE_MS;
+
         // Claim the response BEFORE enqueuing, because enqueueWrite can run the whole first phase
         // of the job synchronously -- and startNextJob's own catch calls failJob INSIDE this
         // handler's call stack, so the deferral can be RESOLVED before drainAndExecute has bound
         // the command to it. PendingResponse buffers a finished answer for exactly that case; see
         // its class comment. The value this method returns on the deferred path is discarded by
         // handleSingle and must not be relied on by anything.
-        PendingResponse pending = (deferrable && !queueBusy)
+        PendingResponse pending = (deferrable && !queueBusy && !tooLate)
             ? dispatcher.deferCurrentResponse() : null;
 
         WriteJob job = new WriteJob("macro/writeClip",
             List.of(new ClipWrite(trackIndex, sceneIndex, lengthBeats, stepSize, notes, name)),
             pending);
-        enqueueWrite(job);
 
-        // AFTER enqueueWrite, never before: see armDeadline's own comment on why arming a deadline
-        // for an answer that has already been produced is the one ordering that would be wrong.
-        armDeadline(job);
+        // DECIDED HERE, ARMED BY THE JOB DRIVER (29-REVIEW.md, IN-04 and WR-04 together).
+        //
+        // It has to be decided here: remainingBudgetMs is a reading about the request currently in
+        // a handler and means nothing once this method returns. It must not be ARMED here, because
+        // arming is a scheduler call and a scheduler call after enqueueWrite is a statement that
+        // can fail while a queued job is already writing. So the figure rides on the job and
+        // startNextJob arms it as the job begins -- which also keeps Phase 29's property that a
+        // deadline is armed only while the deferral is still outstanding.
+        //
+        // The deadline is the SMALLER of the standing deadline and what is left of the caller's
+        // wall. DEFERRAL_DEADLINE_MS keeps its value, which is deliberate: WR-04 is about which
+        // clock the arming reads, never about how long the engine may take.
+        job.deadlineMs = Math.min(DEFERRAL_DEADLINE_MS, remainingBudgetMs);
 
         // The non-deferred path keeps the old contract: this count reports how many notes were
         // ACCEPTED, never that they landed. It now says which contract it is speaking under, and
@@ -403,6 +581,10 @@ public class MacroHandler {
         //                     session/transaction (D-29-15).
         //   "queue-busy"      deferral was available and was DECLINED by the front door above,
         //                     because a write behind an unbounded chain cannot answer in time.
+        //   "late"            deferral was available and the queue was free, and there was still
+        //                     not enough of the caller's own wall left to promise an answer inside
+        //                     it (WR-04). "queue-busy" wins when both hold: it is the more specific
+        //                     fact and it is the one that was true first.
         //
         // Both keys are ALWAYS present, never omitted: JsonRpcDispatcher.java's serializer comment
         // states that a Python reader tests whether a value is None and never tests key
@@ -410,7 +592,16 @@ public class MacroHandler {
         JsonObject result = new JsonObject();
         result.addProperty("count", notes.size());
         result.addProperty("deferred", false);
-        result.addProperty("deferReason", deferrable ? "queue-busy" : "not-deferrable");
+        result.addProperty("deferReason",
+            !deferrable ? "not-deferrable" : queueBusy ? "queue-busy" : "late");
+
+        // THE ENQUEUE IS LAST, AND nothing below this line may throw -- because an error answer
+        // returned while a queued job keeps writing is exactly the blind retry AGENTS.md forbids:
+        // the caller is told the write failed, re-issues it, and gets a second copy of the notes
+        // in their own music (29-REVIEW.md, IN-04). Every read, every coordinate, every validation
+        // and the deadline are all above this line for that reason. A later edit that wants to put
+        // a throwing call below it has to delete this sentence to do so.
+        enqueueWrite(job);
         return result;
     }
 
@@ -849,9 +1040,7 @@ public class MacroHandler {
         dispatcher.handleInternal("clip/setNotes", noteParams);
 
         if (name != null) {
-            JsonObject renameP = new JsonObject();
-            renameP.addProperty("name", name);
-            dispatcher.handleInternal("clip/rename", renameP);
+            renameThroughCursor(name);
         }
 
         // Expressions are NOT applied from here any more. They are a third cursor-scoped hop one
@@ -859,6 +1048,119 @@ public class MacroHandler {
         // expressions landing on the slot after the one their notes went to is the same wrong-slot
         // bug one layer down, and it used to happen on every buildSection chain because the next
         // clip was selected in the same task that scheduled them.
+    }
+
+    /**
+     * Refuse, SYNCHRONOUSLY and before anything is promised or queued, any note whose expression
+     * fields {@link #collectNoteExpressions} would later dereference blindly.
+     *
+     * <p>WHY THIS EXISTS AND WHY IT IS HERE RATHER THAN IN THE TOOL LAYER (29-REVIEW.md, WR-05).
+     * The collection runs deep inside the job, on a scheduled task, and does raw Gson reads:
+     * {@code repeat.get("curve").getAsDouble()} is a NullPointerException when {@code curve} is
+     * absent, {@code getAsJsonObject("expressions")} is an IllegalStateException when the member
+     * is not an object, and {@code note.get("chance").getAsDouble()} is a NumberFormatException on
+     * a string. Before plan 31-06 that throw reached no terminal path at all: {@code finishJob}
+     * never ran, {@code writeInProgress} stayed true for the rest of the session, every later
+     * {@code macro/writeClip} answered {@code queue-busy} at the front door and joined a queue
+     * that never drained again, and the caller that triggered it was told three seconds later that
+     * its write MAY still have landed -- when in fact the notes had landed and the write path was
+     * dead.
+     *
+     * <p>{@code bitwig_call} reaches {@code macro/writeClip} with NO product-side validation in
+     * front of it. That is why the check belongs at this end of the wire: a rule that only the
+     * Python tool layer enforces is a rule the escape hatch does not have.
+     *
+     * <p>ONE FIELD OF ONE NOTE is what the refusal names, and the wording of the absent case is
+     * {@link JsonParamValidator#missingMessage(String)} -- the project's existing spelling --
+     * rather than a second one invented here.
+     *
+     * @throws IllegalArgumentException which {@code JsonRpcDispatcher} turns into a -32602
+     */
+    static void validateExpressionFields(JsonArray notes) {
+        for (int i = 0; i < notes.size(); i++) {
+            JsonElement el = notes.get(i);
+            if (!el.isJsonObject()) {
+                throw new IllegalArgumentException(
+                    noteRef(i) + "each note must be an object, got " + el);
+            }
+            JsonObject note = el.getAsJsonObject();
+
+            // x and y are read for EVERY note, unconditionally, before any expression is even
+            // looked for -- so they are part of this surface whether the note carries expressions
+            // or not.
+            requireNoteNumber(note, "x", "x", i);
+            requireNoteNumber(note, "y", "y", i);
+
+            if (isPresent(note, "chance")) {
+                requireNoteNumber(note, "chance", "chance", i);
+            }
+
+            if (isPresent(note, "expressions")) {
+                JsonObject expressions = requireNoteObject(note, "expressions", "expressions", i);
+                for (String property : expressions.keySet()) {
+                    requireNoteNumber(expressions, property, "expressions." + property, i);
+                }
+            }
+
+            if (isPresent(note, "repeat")) {
+                JsonObject repeat = requireNoteObject(note, "repeat", "repeat", i);
+                requireNoteNumber(repeat, "count", "repeat.count", i);
+                requireNoteNumber(repeat, "curve", "repeat.curve", i);
+                requireNoteNumber(repeat, "velocityEnd", "repeat.velocityEnd", i);
+                requireNoteNumber(repeat, "velocityCurve", "repeat.velocityCurve", i);
+            }
+
+            if (isPresent(note, "occurrence")) {
+                JsonElement occurrence = note.get("occurrence");
+                if (!occurrence.isJsonPrimitive() || !occurrence.getAsJsonPrimitive().isString()) {
+                    throw new IllegalArgumentException(noteRef(i)
+                        + "'occurrence' must be a string, got " + occurrence);
+                }
+            }
+
+            if (isPresent(note, "recurrence")) {
+                JsonObject recurrence = requireNoteObject(note, "recurrence", "recurrence", i);
+                requireNoteNumber(recurrence, "length", "recurrence.length", i);
+                requireNoteNumber(recurrence, "mask", "recurrence.mask", i);
+            }
+        }
+    }
+
+    /** Present and not an explicit null -- the same test the collection itself applies. */
+    private static boolean isPresent(JsonObject note, String key) {
+        return note.has(key) && !note.get(key).isJsonNull();
+    }
+
+    /** Which note the caller has to look at. Zero-based, as the caller's own array is. */
+    private static String noteRef(int noteIndex) {
+        return "note " + noteIndex + ": ";
+    }
+
+    private static void requireNoteNumber(JsonObject owner, String key, String label,
+                                          int noteIndex) {
+        JsonElement el = owner.get(key);
+        if (el == null || el.isJsonNull()) {
+            throw new IllegalArgumentException(
+                noteRef(noteIndex) + JsonParamValidator.missingMessage(label));
+        }
+        if (!el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(
+                noteRef(noteIndex) + "'" + label + "' must be a number, got " + el);
+        }
+    }
+
+    private static JsonObject requireNoteObject(JsonObject owner, String key, String label,
+                                                int noteIndex) {
+        JsonElement el = owner.get(key);
+        if (el == null || el.isJsonNull()) {
+            throw new IllegalArgumentException(
+                noteRef(noteIndex) + JsonParamValidator.missingMessage(label));
+        }
+        if (!el.isJsonObject()) {
+            throw new IllegalArgumentException(
+                noteRef(noteIndex) + "'" + label + "' must be an object, got " + el);
+        }
+        return el.getAsJsonObject();
     }
 
     private ExpressionWork collectNoteExpressions(JsonArray notes) {
@@ -981,29 +1283,153 @@ public class MacroHandler {
         final String name;
 
         /**
-         * Was this slot PROVEN empty immediately before phase 1 created a clip in it?
+         * What the cache SAID about this slot immediately before phase 1 created a clip in it.
          *
          * <p>Three states, and the third is the reason this is a {@code Boolean} and not a
          * {@code boolean}: {@code TRUE} means in range, observed, and observed empty;
-         * {@code FALSE} means observed and holding content; {@code null} means UNPROVEN -- out of
-         * range, or no has-content observer has ever fired for it. Only {@code TRUE} authorises
-         * the undo. An unprovable answer to "was this slot empty?" resolves to leaving the clip
-         * and saying so, never to deleting on a guess, because the thing on the other side of a
-         * wrong guess is material the owner made (D-29-10, D-29-11).
+         * {@code FALSE} means observed and holding content; {@code null} means UNPROVEN -- the
+         * coordinate could not be resolved, it is out of range, or no has-content observer has
+         * ever fired for it. An unprovable answer to "was this slot empty?" resolves to leaving
+         * the clip and saying so, never to deleting on a guess, because the thing on the other
+         * side of a wrong guess is material the owner made (D-29-10, D-29-11).
          *
          * <p>Recorded BEFORE {@code createClip}, which is the only moment it can be read: one
          * flush later the slot holds the clip this job just made, and the observation is gone.
+         *
+         * <p>It is a READING and not yet a proof, which is why it is no longer what the undo
+         * consults. {@link #slotWasEmpty} is the proof, and {@link
+         * MacroHandler#settleSlotEvidence} is where this reading either becomes one or is
+         * withdrawn (29-REVIEW.md, WR-01).
+         */
+        Boolean slotReadBeforeCreate;
+
+        /**
+         * Was this slot PROVEN empty immediately before phase 1 created a clip in it?
+         *
+         * <p>The same three states as {@link #slotReadBeforeCreate} and the same discipline --
+         * only {@code TRUE} authorises the undo -- but this one is settled ONE FLUSH OR MORE
+         * LATER, when the freshness of the reading can be tested rather than assumed. See
+         * {@link MacroHandler#settleSlotEvidence} for the four facts it conjoins and for why a
+         * reading taken before the create cannot be conjoined with its own freshness at the
+         * moment it is taken.
          */
         Boolean slotWasEmpty;
 
         /**
+         * The observation sequence the emptiness reading was actually taken at, or {@code 0} when
+         * this slot has never been observed.
+         *
+         * <p>Published to the caller as {@code slotObservedAt}, so a refusal can say how fresh
+         * its own evidence was rather than asserting a freshness it cannot show. Zero is an
+         * absence and travels as an explicit JSON null, like every other absence in this payload.
+         */
+        long emptinessObservationSeq;
+
+        /**
+         * Has {@link MacroHandler#settleSlotEvidence} already run for this clip?
+         *
+         * <p>The settle is idempotent because the terminal paths do not all know about each
+         * other: a deadline task that fires after a refusal must not re-derive an answer the
+         * refusal already published, or the two copies of one fact could disagree.
+         */
+        boolean evidenceSettled;
+
+        /**
+         * The PHYSICAL bank slot {@link #trackIndex} resolves to, or {@code -1} when it could not
+         * be resolved.
+         *
+         * <p>Resolved ONCE, at the top of phase 1, and carried: every read of the cache's clip
+         * arrays on this path is subscripted with this rather than with the caller's public index,
+         * because those arrays are filled from the canonical FLAT bank and the two coordinates
+         * differ the moment a group is collapsed or the bank is scrolled (29-REVIEW.md, WR-02).
+         * {@code -1} is unproven, never slot zero, and everything reading it treats it that way.
+         */
+        int bankSlot = -1;
+
+        /**
+         * The unique name written through the cursor to prove, before any note is dispatched, that
+         * the cursor is holding the clip in the slot this write named. Null until phase 2 stamps.
+         */
+        String stampToken;
+
+        /**
+         * {@code StateCache#currentObservationTick()} as it stood at the instant of the stamp.
+         *
+         * <p>The echo is accepted only on an observation STRICTLY NEWER than this. That is the
+         * load-bearing half: an observation that is merely PRESENT proves nothing -- the slot's
+         * name has been published since startup -- while one that arrived after the stamp is the
+         * only thing that can carry the stamp's own token.
+         */
+        long stampObservationSeq;
+
+        /**
+         * What every slot was called immediately before the stamp, subscripted by PHYSICAL bank
+         * slot.
+         *
+         * <p>The stamp mutates a clip whose identity is not yet proven, so the name it overwrites
+         * has to be recoverable. The copy is 256 interned string references taken on the session
+         * thread -- a shallow array copy, and the cost is stated here so a later reader does not
+         * have to re-derive it.
+         */
+        String[][] priorNames;
+
+        /**
+         * Was the stamp's own rename PROVEN to have been put back? {@code TRUE} or null, never
+         * false.
+         *
+         * <p>Null is the absence, and it is deliberately not a false: a restore that was attempted
+         * and could not be proven, and a restore that was never attempted at all, are different
+         * facts. The pair with {@link #stampLeftAt} is what tells them apart -- see
+         * {@link MacroHandler#restoreStampedName}.
+         */
+        Boolean stampRestored;
+
+        /**
+         * Where the stamp was found when the proof failed, or null when no slot carried the token.
+         *
+         * <p>Spelled in the same textual form the landed payload uses, {@code t<n>s<n>}, with one
+         * difference a reader must not guess at: its FIRST number is a PHYSICAL BANK SLOT, not a
+         * public track index, because the arrays the token was located in are keyed that way.
+         * Saying which coordinate space it is in costs a sentence; translating it could be wrong.
+         */
+        String stampLeftAt;
+
+        /**
+         * Was {@code clip/create} DISPATCHED for this clip without throwing?
+         *
+         * <p>A fact about this engine's own call, and nothing more. It is deliberately not the
+         * answer to "did a clip appear?", because at API v25 those are different questions: a
+         * create over an occupied slot is acknowledged and changes nothing (measured at
+         * 29-LIVE-ACCEPTANCE.md section 3, live step 5). {@link #created} is the answer to the
+         * other question, and this is one of its inputs.
+         */
+        boolean createDispatched;
+
+        /**
          * Did phase 1 actually create a clip at this slot?
          *
-         * <p>Reported to the caller as {@code clipCreated}. False when {@code createClip} threw
-         * before reaching this clip -- which is the one case where "this job put a clip there" is
-         * not true, and the one case a flat {@code true} would misreport.
+         * <p>Reported to the caller as {@code clipCreated}, and THREE-STATE since plan 31-05,
+         * which is why it is a {@code Boolean} and not a {@code boolean}:
+         *
+         * <ul>
+         *   <li>{@code TRUE} -- the slot was PROVEN empty before the create and the create was
+         *       dispatched, so a clip appeared where there was none.</li>
+         *   <li>{@code FALSE} -- either {@code clip/create} threw before reaching this clip, or
+         *       the slot was proven to be holding content, in which case v25 treated the create
+         *       as a no-op and nothing was made.</li>
+         *   <li>{@code null} -- UNPROVEN. The slot's emptiness could not be proven, so whether
+         *       the dispatch created anything cannot be either. It is published as an absence
+         *       and never as a false: "no clip was created" and "nobody can say" are different
+         *       facts, and collapsing the second into the first is the same misreport this field
+         *       was corrected to stop (29-REVIEW.md, IN-05).</li>
+         * </ul>
+         *
+         * <p>Derived in {@link MacroHandler#settleSlotEvidence} from {@link #slotWasEmpty} -- the
+         * measured answer -- rather than from the dispatch alone. Before plan 31-05 it was set
+         * {@code true} on any successful dispatch, so a refusal aimed at an occupied slot
+         * reported {@code clipCreated: true} for a create Bitwig had ignored.
          */
-        boolean created;
+        Boolean created;
 
         ClipWrite(int trackIndex, int sceneIndex, int lengthBeats, double stepSize,
                   JsonArray notes, String name) {
@@ -1017,6 +1443,15 @@ public class MacroHandler {
 
         String label() {
             return "t" + trackIndex + "s" + sceneIndex;
+        }
+
+        /** What the slot this write NAMED was called immediately before the stamp, or null. */
+        String priorNameAtNamedSlot() {
+            if (priorNames == null || bankSlot < 0 || bankSlot >= priorNames.length
+                || sceneIndex < 0 || sceneIndex >= priorNames[bankSlot].length) {
+                return null;
+            }
+            return priorNames[bankSlot][sceneIndex];
         }
     }
 
@@ -1037,6 +1472,39 @@ public class MacroHandler {
         final PendingResponse pending;
 
         int index;
+
+        /**
+         * {@code StateCache#currentObservationTick()} as it stood at the top of phase 1, before
+         * this job created anything.
+         *
+         * <p>It dates the job. An observation numbered at or below it landed BEFORE this job
+         * existed and therefore describes the slot as it was before -- which is not a statement
+         * about the slot this job then created into. An observation numbered above it landed
+         * after the job acted, and is the only kind that can carry the effect of the job's own
+         * {@code clip/create}. {@link MacroHandler#settleSlotEvidence} is the one reader.
+         *
+         * <p>Recorded once per job rather than once per clip because phase 1 creates every clip
+         * of a chain in one uninterrupted pass: there is exactly one instant at which none of
+         * them had been created yet, and that instant is this one.
+         */
+        long startObservationTick;
+
+        /**
+         * The deadline this job's claimed response is bounded by, in milliseconds, as DECIDED by
+         * the handler on the caller's own clock.
+         *
+         * <p>DECIDED IN THE HANDLER, ARMED BY THE DRIVER, and the split is the point (plan 31-06).
+         * Only the handler can compute it: {@code JsonRpcDispatcher#remainingBudgetMs()} is a
+         * reading about the request now in a handler, and it is meaningless once the handler has
+         * returned. But the handler must not ARM it, because arming is the last thing that could
+         * throw after {@code enqueueWrite} -- and an error answer returned while a queued job
+         * keeps writing is the blind retry this project forbids (29-REVIEW.md, IN-04). So the
+         * figure rides here and {@link MacroHandler#startNextJob} arms it as the job starts.
+         *
+         * <p>Meaningless when {@link #pending} is null; {@link MacroHandler#armDeadline} no-ops
+         * there, exactly as {@code completePending} does.
+         */
+        long deadlineMs = DEFERRAL_DEADLINE_MS;
 
         WriteJob(String method, List<ClipWrite> clips) {
             this(method, clips, null);
@@ -1087,18 +1555,35 @@ public class MacroHandler {
      * {@code PendingResponse}'s completion is one-shot on the other side. Two independent reasons
      * a late deadline cannot overwrite a real answer, not one.
      *
-     * <p>WHY IT IS CALLED AFTER {@code enqueueWrite}. {@code enqueueWrite} can run the whole first
-     * phase of the job synchronously, and {@code startNextJob}'s own catch can complete the
-     * response inside the handler's call stack. Arming before that would schedule a deadline for
-     * a response already produced -- harmless, because the task re-checks, but it would leave a
-     * task parked for three seconds on a job that finished in the same flush, and it would make
-     * "a deadline is armed exactly when a deferral is still outstanding" untrue.
+     * <p>WHY IT IS CALLED FROM {@code startNextJob} RATHER THAN FROM THE HANDLER, since plan
+     * 31-06 (29-REVIEW.md, IN-04). The handler must end with its {@code enqueueWrite}: anything
+     * after it is a statement that can throw while a queued job is already writing, and the
+     * dispatcher would then answer the caller an error for a write still in flight -- the blind
+     * retry this project forbids. Arming is a scheduler call, so it moved INTO the job driver
+     * rather than merely moving above the enqueue.
+     *
+     * <p>WHICH KEEPS BOTH PHASE 29 PROPERTIES INTACT, and that is why it moved there rather than
+     * simply earlier. It still runs after {@code startNextJob}'s own phase-1 catch, so a job that
+     * failed and answered inside the handler's call stack still arms nothing; and it still runs
+     * after the verify hop is scheduled, so a scheduler that collapses the flush window to zero
+     * -- {@code MacroHandlerTest}'s {@code IMMEDIATE_SCHEDULER} does exactly that -- runs the
+     * whole job to its real answer first and finds this a no-op. Arming from the handler ahead of
+     * the enqueue would have inverted that order and answered {@code WRITE_UNRESOLVED} for a write
+     * that had not begun.
+     *
+     * <p>WHICH CLOCK IT IS ARMED AGAINST, since plan 31-06 (29-REVIEW.md, WR-04). The caller
+     * passes the deadline in rather than this method reading {@link #DEFERRAL_DEADLINE_MS}, because
+     * the honest bound is the SMALLER of that constant and whatever is left of the caller's own
+     * five-second wall -- and only the handler, holding the dispatcher's remaining-budget reading,
+     * can know the second number. The constant did not move; what moved is which clock it is
+     * compared against. The figure that is armed is also the figure the unresolved answer reports,
+     * so a caller answered early is told the shorter deadline it was actually measured against.
      *
      * <p>No console marker is written here, deliberately. The two markers this class declares are
      * a forensic trail for a refusal the caller could not see; this outcome IS the answer the
      * caller receives.
      */
-    private void armDeadline(WriteJob job) {
+    private void armDeadline(WriteJob job, long deadlineMs) {
         if (job.pending == null || job.pending.isCompleted()) {
             return;
         }
@@ -1110,6 +1595,7 @@ public class MacroHandler {
             // one; the clamp is there because a chain job never claims a response at all and a
             // finished index would otherwise be out of range.
             ClipWrite clip = job.clips.get(Math.min(job.index, job.clips.size() - 1));
+            settleSlotEvidence(job, clip);
 
             // Every key is ALWAYS present, JSON null where unobserved -- the explicit-null reader
             // rule at JsonRpcDispatcher.java:55-57. clipCreated and clipRemoved were DECLARED as
@@ -1119,16 +1605,20 @@ public class MacroHandler {
             // observe this" about something the engine now does observe -- which is the same class
             // of false claim this plan exists to remove from the refusal.
             JsonObject data = new JsonObject();
-            data.addProperty("deadlineMs", DEFERRAL_DEADLINE_MS);
+            // The deadline ACTUALLY ARMED, not the standing constant. The two are the same
+            // whenever the request reached this handler promptly, and they differ exactly when
+            // the caller's wall was already partly spent -- which is the case the caller most
+            // needs told, and the one a hardcoded constant would have misreported (WR-04).
+            data.addProperty("deadlineMs", deadlineMs);
             data.addProperty("requestedTrack", clip.trackIndex);
             data.addProperty("requestedScene", clip.sceneIndex);
             data.addProperty("noteCount", clip.notes.size());
-            data.addProperty("clipCreated", clip.created);
+            addCreated(data, clip);
             data.addProperty("clipRemoved", false);
 
             job.pending.completeError(
                 JsonRpcError.WRITE_UNRESOLVED, WRITE_UNRESOLVED_MESSAGE, data);
-        }, DEFERRAL_DEADLINE_MS);
+        }, deadlineMs);
     }
 
     /**
@@ -1184,6 +1674,11 @@ public class MacroHandler {
 
         // Phase 1: create every clip of the job, then move the cursor to the first one. Both are
         // cursor-affecting, so both belong inside the serialised job rather than in the handler.
+        //
+        // The instant BEFORE any of it is what dates every emptiness answer this job will give.
+        // It is taken here, once, and before the first create, because that is the only moment at
+        // which nothing this job does has happened yet.
+        job.startObservationTick = stateCache.currentObservationTick();
         try {
             for (ClipWrite clip : job.clips) {
                 // BEFORE the creation, never after: one flush later this slot holds the clip we
@@ -1191,14 +1686,35 @@ public class MacroHandler {
                 // conjoined, and anything short of all three is null rather than false -- an
                 // out-of-range coordinate and a never-observed slot both read as empty in the
                 // underlying primitive array, and neither is a proof (D-29-10, D-29-11).
-                clip.slotWasEmpty =
-                    stateCache.clipSlotInRange(clip.trackIndex, clip.sceneIndex)
-                        && stateCache.clipHasContentObserved(clip.trackIndex, clip.sceneIndex)
-                    ? Boolean.valueOf(!stateCache.clipHasContent(clip.trackIndex, clip.sceneIndex))
+                //
+                // The coordinate is resolved ONCE, here, and carried on the record: the arrays
+                // below are keyed on the physical bank slot while the caller sent a public index,
+                // and on a scrolled or grouped bank those address different tracks (WR-02). An
+                // unresolvable index is one more way of not having proved anything, so it joins
+                // the same conjunction rather than defaulting to slot zero.
+                //
+                // A FOURTH fact joins them, and it cannot be evaluated here: the observation this
+                // reading rests on has to be NEWER than the instant above, and at this instant
+                // nothing can be. An observation that is merely PRESENT proves nothing -- Bitwig
+                // fires every slot's has-content observer at init, so after startup a present
+                // observation is the permanent state of every in-range slot and is exactly the
+                // one-flush-stale value D-29-11 exists to distrust (29-REVIEW.md, WR-01). So what
+                // is recorded here is a READING and the sequence it was taken at; the fourth fact
+                // is conjoined in settleSlotEvidence, one flush or more later, where the launcher
+                // has had a chance to report the slot again and the reading can either be proven
+                // current or withdrawn.
+                clip.bankSlot = stateCache.resolveCanonicalBankSlot(clip.trackIndex);
+                clip.emptinessObservationSeq =
+                    stateCache.getClipObservationSeqAtBankSlot(clip.bankSlot, clip.sceneIndex);
+                clip.slotReadBeforeCreate =
+                    clip.bankSlot >= 0
+                        && stateCache.clipSlotInRange(clip.bankSlot, clip.sceneIndex)
+                        && stateCache.clipHasContentObserved(clip.bankSlot, clip.sceneIndex)
+                    ? Boolean.valueOf(!stateCache.clipHasContent(clip.bankSlot, clip.sceneIndex))
                     : null;
 
                 createClip(clip.trackIndex, clip.sceneIndex, clip.lengthBeats);
-                clip.created = true;
+                clip.createDispatched = true;
             }
             ClipWrite first = job.clips.get(0);
             forceSelectClip(first.trackIndex, first.sceneIndex);
@@ -1208,6 +1724,12 @@ public class MacroHandler {
         }
 
         scheduler.schedule(() -> verifyThenWrite(job, FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+
+        // LAST, and after the phase-1 catch above, so the two Phase 29 properties survive the
+        // IN-04 reordering: a deadline is armed only for a deferral that is still outstanding,
+        // and never for a job whose own first phase has already failed and answered inside this
+        // call stack. The handler decided the figure; this is where it is armed.
+        armDeadline(job, job.deadlineMs);
     }
 
     /**
@@ -1227,19 +1749,222 @@ public class MacroHandler {
                 // Possibly just a stale observer; give the flush cycle another go.
                 scheduler.schedule(() -> verifyThenWrite(job, elapsedMs + FLUSH_DELAY_MS), FLUSH_DELAY_MS);
             } else {
-                refuseJob(job, clip, observedTrack, observedScene, elapsedMs);
+                refuseJob(job, clip, observedTrack, observedScene, elapsedMs,
+                    CURSOR_VERIFY_CEILING_MS, REFUSAL_CURSOR_POSITION);
             }
             return;
         }
 
+        // The compare has agreed -- and agreeing while WRONG is exactly what it does at the
+        // timing this phase exists for: 31-ECHO-MEASUREMENT.md's 100 ms row, where the engine
+        // answered success and claimed a slot the notes were not in. So nothing is written yet.
+        // The identity proof goes HERE, between the compare and the notes, which is what makes a
+        // failed proof cost no notes anywhere and leaves the existing refusal and undo to apply
+        // unchanged (D-31-02).
+        stampThenProve(job, clip);
+    }
+
+    /**
+     * Write a unique token through the cursor and then ask the NAMED SLOT ITSELF whether it got it.
+     *
+     * <p>There is no synchronous identity read at API v25 -- every accessor on the cursor clip
+     * returns an observer, and the observers are what the compare above already read. So the
+     * correction is not a better read of the same witness: it is a DIFFERENT witness. The named
+     * slot's own indexed name observer is registered for all sixteen tracks and sixteen slots and
+     * is fed by the launcher rather than by the cursor, so an echo arriving there could only have
+     * come from a cursor that was on that slot.
+     *
+     * <p>The names snapshot is taken BEFORE the token goes out, because at the exact timing this
+     * proof exists to catch, the cursor is on somebody else's clip and the stamp renames it. See
+     * {@link #restoreStampedName}.
+     */
+    private void stampThenProve(WriteJob job, ClipWrite clip) {
+        clip.priorNames = stateCache.snapshotClipNames();
+        clip.stampToken = STAMP_PREFIX + (++stampSeq) + "-c" + job.index;
+        clip.stampObservationSeq = stateCache.currentObservationTick();
         try {
-            writeNotesToCursor(clip.stepSize, clip.notes, clip.name);
+            renameThroughCursor(clip.stampToken);
         } catch (Exception e) {
             failJob(job, clip, e);
             return;
         }
+        scheduler.schedule(() -> proveStampEcho(job, clip, FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+    }
 
-        ExpressionWork work = collectNoteExpressions(clip.notes);
+    /**
+     * THE PROOF. Three facts, conjoined, in the same shape phase 1's emptiness read already uses,
+     * and anything short of all three is not a proof:
+     *
+     * <ol>
+     *   <li>the caller's track index RESOLVED to a physical bank slot -- {@code -1} is unproven,
+     *       never slot zero;</li>
+     *   <li>that slot's observation sequence is STRICTLY GREATER than the tick recorded at the
+     *       stamp, so the reading is newer than the act it is meant to witness; and</li>
+     *   <li>the name it published is the token, exactly.</li>
+     * </ol>
+     *
+     * <p>Only then do the step size and the notes go out. On a miss it re-polls one flush later
+     * while {@link #STAMP_ECHO_CEILING_MS} remains, and on exhaustion refuses through the existing
+     * path with the existing code and the observed position. It NEVER re-points the cursor and
+     * writes again: a false refusal is the accepted price of never a false success (D-31-07,
+     * D-31-08), and a creating retry would put a second copy of the notes in the owner's music.
+     *
+     * <p>Paid PER CLIP and never amortised across a chain (D-31-11). Each clip has its own slot
+     * and its own cursor move, so a shared proof would prove nothing about the later clips -- the
+     * same reasoning that already gives the expression hop its own re-verified flush.
+     */
+    private void proveStampEcho(WriteJob job, ClipWrite clip, long elapsedMs) {
+        boolean resolved = clip.bankSlot >= 0;
+        long observedSeq = resolved
+            ? stateCache.getClipObservationSeqAtBankSlot(clip.bankSlot, clip.sceneIndex)
+            : 0;
+        String observedName = resolved
+            ? stateCache.getClipNameAtBankSlot(clip.bankSlot, clip.sceneIndex)
+            : null;
+
+        if (resolved
+            && observedSeq > clip.stampObservationSeq
+            && clip.stampToken.equals(observedName)) {
+            writeProvenClip(job, clip);
+            return;
+        }
+
+        if (elapsedMs + FLUSH_DELAY_MS <= STAMP_ECHO_CEILING_MS) {
+            scheduler.schedule(
+                () -> proveStampEcho(job, clip, elapsedMs + FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+            return;
+        }
+
+        // The proof has failed, so the stamp is on a clip that is not the caller's. Put the name
+        // back BEFORE the refusal completes, so the answer can say whether the put-back was
+        // proven rather than leaving the owner to find out.
+        final long waitedMs = elapsedMs;
+        restoreStampedName(clip, () -> refuseJob(job, clip,
+            stateCache.getClipCursorTrackPosition(), stateCache.getClipCursorSceneIndex(),
+            waitedMs, STAMP_ECHO_CEILING_MS, REFUSAL_STAMP_ECHO));
+    }
+
+    /**
+     * Put back the name the stamp overwrote, then say plainly whether the put-back was proven.
+     *
+     * <p>WHY THIS EXISTS. The stamp is a rename and a rename is cursor-scoped, so at the exact
+     * timing the proof is built to catch, the clip it renames is not the caller's. Without this,
+     * the proof that stops the engine writing the caller's notes into somebody else's clip would
+     * instead have renamed that clip -- on EVERY write that reaches phase 2 while the cursor is
+     * elsewhere, which by construction is every case this phase exists for. A phase whose subject
+     * is truthfulness must not silently rename the owner's music.
+     *
+     * <p>HOW THE SLOT IS FOUND. The token is unique per write (D-31-04), so at most one slot can
+     * be carrying it, and that slot names exactly where the cursor was. The cursor is STILL on
+     * that clip -- that is why the echo failed -- so the prior name goes back through the same
+     * cursor-scoped rename route, with no new coordinate and no new RPC. The re-read one flush
+     * later is what makes the reported fact an observation rather than a claim: an accepted
+     * dispatch is not proof here either.
+     *
+     * <p>WHAT IT REPORTS, as two facts rather than one. Both absent means the token was not found
+     * at any slot: the stamp may not have landed anywhere observable, which is itself the honest
+     * answer and one the pair has to be able to express. {@code stampLeftAt} present with
+     * {@code stampRestored} absent means the restore was attempted there and could not be proven.
+     * {@code stampRestored} true means a read saw the prior name back.
+     */
+    private void restoreStampedName(ClipWrite clip, Runnable then) {
+        String[][] now = stateCache.snapshotClipNames();
+        int foundBankSlot = -1;
+        int foundScene = -1;
+        for (int bank = 0; bank < now.length && foundBankSlot < 0; bank++) {
+            for (int scene = 0; scene < now[bank].length; scene++) {
+                if (clip.stampToken != null && clip.stampToken.equals(now[bank][scene])) {
+                    foundBankSlot = bank;
+                    foundScene = scene;
+                    break;
+                }
+            }
+        }
+
+        if (foundBankSlot < 0) {
+            // Nothing carries the token. Both keys stay absent, which is the pair's way of saying
+            // the stamp did not land anywhere this engine can see.
+            then.run();
+            return;
+        }
+
+        clip.stampLeftAt = "t" + foundBankSlot + "s" + foundScene;
+        String prior = clip.priorNames != null ? clip.priorNames[foundBankSlot][foundScene] : null;
+        final String wanted = prior != null ? prior : "";
+        try {
+            renameThroughCursor(wanted);
+        } catch (Exception e) {
+            // Attempted and not proven: stampLeftAt says where, stampRestored stays absent.
+            then.run();
+            return;
+        }
+
+        final int bankSlot = foundBankSlot;
+        final int sceneIndex = foundScene;
+        scheduler.schedule(() -> {
+            if (wanted.equals(stateCache.getClipNameAtBankSlot(bankSlot, sceneIndex))) {
+                clip.stampRestored = Boolean.TRUE;
+            }
+            then.run();
+        }, FLUSH_DELAY_MS);
+    }
+
+    /** The one cursor-scoped rename route, shared by the stamp, the final name and the restore. */
+    private void renameThroughCursor(String name) throws Exception {
+        JsonObject params = new JsonObject();
+        params.addProperty("name", name);
+        dispatcher.handleInternal("clip/rename", params);
+    }
+
+    /**
+     * The name the clip is left carrying once the proof has held: the caller's when they gave one,
+     * and otherwise whatever the named slot was called before the stamp.
+     *
+     * <p>This is not decoration. The stamp is a real rename, so a write that named no clip would
+     * otherwise leave the owner looking at a clip called {@code SECONDO-STAMP-3-c0}. The rename is
+     * cursor-scoped like every other step here and is safe for exactly the reason the notes are:
+     * it runs only inside the branch where the slot's own observer has just proved the cursor is
+     * on it.
+     *
+     * <p>Empty string when that name was never observed -- a state a running Bitwig is not in,
+     * since every slot's name observer fires at initialization, and the name a clip phase 1 has
+     * just created carries anyway.
+     */
+    private static String finalNameFor(ClipWrite clip) {
+        if (clip.name != null) {
+            return clip.name;
+        }
+        String prior = clip.priorNameAtNamedSlot();
+        return prior != null ? prior : "";
+    }
+
+    /** Phase 2b: the write itself, reached only through an echo the named slot published. */
+    private void writeProvenClip(WriteJob job, ClipWrite clip) {
+        ExpressionWork work;
+        try {
+            writeNotesToCursor(clip.stepSize, clip.notes, finalNameFor(clip));
+            // INSIDE the guard, since plan 31-06 (29-REVIEW.md, WR-05). This is the WEAKER half of
+            // WR-05's fix and it is kept as a BACKSTOP rather than as the fix: handleWriteClip now
+            // refuses a malformed payload before anything is queued, but macro/buildSection's
+            // chain reaches this same collection, and a throw here used to escape every terminal
+            // path -- leaving writeInProgress latched true and the write path dead for the rest of
+            // the session. A guard that ends in a terminal path is what makes finishJob's clearing
+            // of that flag unconditional.
+            work = collectNoteExpressions(clip.notes);
+        } catch (Exception e) {
+            // The proof still holds -- the cursor is on the slot the caller named -- so the token
+            // is on OUR clip and this rename cannot reach anybody else's. Best-effort and
+            // deliberately silent: the write has already failed, or its expressions cannot be read,
+            // and that is the fact the caller is about to be given.
+            try {
+                renameThroughCursor(finalNameFor(clip));
+            } catch (Exception ignored) {
+                // Nothing further to try. A visible token is the report.
+            }
+            failJob(job, clip, e);
+            return;
+        }
+
         if (work == null) {
             advance(job, clip, "none");
             return;
@@ -1293,6 +2018,80 @@ public class MacroHandler {
     }
 
     /**
+     * Settle what this job can PROVE about the slot it named, at the last moment before an answer
+     * carrying that proof is published.
+     *
+     * <p>WHY THE PROOF IS NOT COMPLETED WHERE THE READING IS TAKEN. The reading has to be taken
+     * before {@code clip/create}, because one flush later the slot holds the clip this job just
+     * made. Its freshness cannot be tested there: {@code startObservationTick} is read at that
+     * same instant, so nothing can yet be newer than it. Conjoining the two in phase 1 would
+     * therefore make every answer unproven and retire the undo altogether -- which is not the
+     * safe direction, it is a different wrong answer, and it would leave an empty clip at the
+     * owner's named slot on every refusal (D-31-09 forbids exactly that shape of regression).
+     * So the reading and its date are recorded in phase 1 and conjoined HERE, on a terminal path,
+     * by which time the job's own {@code clip/create} has had at least one flush to be reported.
+     *
+     * <p>WHAT THE FOURTH FACT BUYS. An observation newer than the job's own start is the only
+     * kind that can carry the effect of the job's create. Requiring it means the undo deletes
+     * only when the launcher itself has spoken about that slot since this job acted -- so a
+     * create that was accepted and did nothing (the v25 no-op over an occupied slot), a slot
+     * whose coordinate never resolved, and a slot nothing has ever observed all withhold the
+     * delete instead of licensing it. It is strictly narrower than the guard it replaces: every
+     * case that deleted before and still deletes now also satisfied the three facts it satisfied
+     * before.
+     *
+     * <p>WHAT IT DOES NOT BUY, stated because a half-closed hazard read as a closed one is worse
+     * than an open one. 29-REVIEW.md WR-01's own example -- a {@code clip/insertFile} for the
+     * same slot drained in the same {@code drainAndExecute} as this write -- still produces a
+     * fresh observation, because THEIR content lands on the slot and is reported. Freshness alone
+     * cannot tell whose content arrived; only knowing that a content-creating request was
+     * dispatched for that slot can, which is the second clause of WR-01's fix and needs a
+     * per-slot dispatch record in {@code StateCache} that {@code ClipHandler} writes to. That is
+     * a cross-handler change this plan did not have, and it is filed rather than assumed closed.
+     *
+     * <p>Idempotent: the first terminal path to run settles the answer, and a later one reads
+     * what it decided rather than re-deriving it against a cache that has moved on.
+     */
+    private void settleSlotEvidence(WriteJob job, ClipWrite clip) {
+        if (clip.evidenceSettled) {
+            return;
+        }
+        clip.evidenceSettled = true;
+
+        // FOUR facts, conjoined, and the coordinate is the RESOLVED bank slot in every one of
+        // them -- the same slot the create dispatched into and the same slot the delete will
+        // address. A reading taken against the caller's public index and a delete addressed by
+        // the resolved one are two different slots the moment the bank is scrolled or a group is
+        // collapsed, and the delete is the one that reaches the owner's music (WR-02).
+        //
+        // The FALSE answer falls out of the else, and is deliberately NOT gated on freshness: it
+        // authorises no delete, so withholding it would buy no safety, and it would replace a
+        // specific true report -- the slot already held content -- with a vaguer one, and lose
+        // the fact that makes the create a no-op rather than an unknown (IN-05).
+        clip.slotWasEmpty =
+            clip.bankSlot >= 0
+                && Boolean.TRUE.equals(clip.slotReadBeforeCreate)
+                && stateCache.clipSlotInRange(clip.bankSlot, clip.sceneIndex)
+                && stateCache.getClipObservationSeqAtBankSlot(clip.bankSlot, clip.sceneIndex)
+                    > job.startObservationTick
+            ? Boolean.TRUE
+            : Boolean.FALSE.equals(clip.slotReadBeforeCreate) ? Boolean.FALSE : null;
+
+        // One fact, one vocabulary: the field assigned below IS the published `clipCreated`, and
+        // from this plan it is derived from the measured emptiness answer rather than from a
+        // dispatch Bitwig may have ignored. At API v25 a create over an occupied slot is
+        // acknowledged and changes nothing, so a flag set true on a successful dispatch was
+        // answering a question nobody asked (29-REVIEW.md, IN-05). Three states, and the third is
+        // an absence rather than a false, because a create that may or may not have happened is
+        // not the same fact as a create that provably did not.
+        clip.created =
+            !clip.createDispatched ? Boolean.FALSE
+                : Boolean.TRUE.equals(clip.slotWasEmpty) ? Boolean.TRUE
+                : Boolean.FALSE.equals(clip.slotWasEmpty) ? Boolean.FALSE
+                : null;
+    }
+
+    /**
      * @param cursorTrack where the launcher cursor clip actually was, or -1 if never observed.
      *                    Named for what the RESPONSE calls it, not for the observer that reports
      *                    it: the snapshot record used to speak observedTrack / observedScene here
@@ -1300,11 +2099,19 @@ public class MacroHandler {
      *                    vocabularies inside one method is how a caller ends up reading the wrong
      *                    key (D-29-18; src/secondo/tools/write_clip.py:1961-1964 already reads
      *                    these two names).
+     * @param ceilingMs   which budget was exhausted -- the position compare's or the identity
+     *                    proof's. Reported rather than assumed: the two differ, and a refusal that
+     *                    quoted the wrong one would misdescribe how long the cursor was given.
+     * @param refusalReason which of the two triggers fired, as a value a program can read.
      */
     private void refuseJob(WriteJob job, ClipWrite clip, int cursorTrack, int cursorScene,
-                           long elapsedMs) {
+                           long elapsedMs, long ceilingMs, String refusalReason) {
         String timestamp = java.time.Instant.now().toString();
         stateCache.recordWriteClipRefusal();
+
+        // The slot facts are settled BEFORE the undo decides anything, because the undo is what
+        // consumes them. This is the terminal path that deletes.
+        settleSlotEvidence(job, clip);
 
         // THE UNDO (plan 29-03, T-29-06). Phase 1 created a clip at the slot the caller named --
         // that is what made the slot addressable and what the verify then read -- so a refusal
@@ -1324,12 +2131,17 @@ public class MacroHandler {
             + " requested=" + clip.label()
             + " observed=" + position(cursorTrack, cursorScene)
             + " notes=" + clip.notes.size()
-            + " ceilingMs=" + CURSOR_VERIFY_CEILING_MS
+            + " ceilingMs=" + ceilingMs
             + " waitedMs=" + elapsedMs
+            + " reason=" + refusalReason
             + " — REFUSED: the cursor clip was not on the slot this write named, so no notes were"
             + " written. " + slotOutcome(clip, clipRemoved, leftoverReason) + chainSummary(job));
 
-        // Terminal path 2 of 4: the refusal now travels IN THE RESPONSE, not only in the marked
+        // Terminal path 2 of 4, and it now has TWO triggers rather than one: the position compare
+        // never agreed, or it agreed and the identity proof that follows it did not. Both are the
+        // same clean refusal -- same code, same undo, same response shape -- so this stays one
+        // terminal path and `refusalReason` carries the difference (D-31-07). The refusal travels
+        // IN THE RESPONSE, not only in the marked
         // console line above and the snapshot counter. The four position keys are the ones
         // src/secondo/tools/write_clip.py:1961-1964 already reads; ceilingMs and finding say how
         // long the cursor was given and which finding this refusal belongs to; and the last three
@@ -1340,11 +2152,30 @@ public class MacroHandler {
         data.addProperty("requestedScene", clip.sceneIndex);
         addPosition(data, "cursorTrack", cursorTrack);
         addPosition(data, "cursorScene", cursorScene);
-        data.addProperty("ceilingMs", CURSOR_VERIFY_CEILING_MS);
+        data.addProperty("ceilingMs", ceilingMs);
+        data.addProperty("refusalReason", refusalReason);
         data.addProperty("finding", "TODO-WRONG-SLOT");
-        data.addProperty("clipCreated", clip.created);
+        addCreated(data, clip);
         data.addProperty("clipRemoved", clipRemoved);
         data.addProperty("leftoverReason", leftoverReason);
+        // How fresh the evidence behind the line above actually was: the observation sequence the
+        // emptiness reading was taken at, or an explicit null when nothing has ever observed that
+        // slot. One key, spelled once, in the slot-facts vocabulary the three above already use.
+        addObservationSeq(data, "slotObservedAt", clip.emptinessObservationSeq);
+        // The stamp's own two facts, in the vocabulary the undo beside them already uses and with
+        // the same discipline: an absence is PUBLISHED rather than omitted, and an unproven
+        // restore is an absence rather than a false. Both null on a position-compare refusal,
+        // where no stamp was ever written -- which is the honest reading of "never attempted".
+        if (Boolean.TRUE.equals(clip.stampRestored)) {
+            data.addProperty("stampRestored", true);
+        } else {
+            data.add("stampRestored", JsonNull.INSTANCE);
+        }
+        if (clip.stampLeftAt != null) {
+            data.addProperty("stampLeftAt", clip.stampLeftAt);
+        } else {
+            data.add("stampLeftAt", JsonNull.INSTANCE);
+        }
         completePending(job, JsonRpcError.CURSOR_MISMATCH,
             "the cursor clip was not on the slot this write named, so nothing was written",
             data);
@@ -1386,22 +2217,51 @@ public class MacroHandler {
      * removal ran and did not succeed.
      */
     private static String leftoverReason(ClipWrite clip, boolean clipRemoved) {
-        if (clipRemoved || !clip.created) {
+        if (clipRemoved) {
+            return null;
+        }
+        if (Boolean.FALSE.equals(clip.created)) {
+            // Nothing of this write's making is at the slot, so there is nothing left over. The
+            // occupied case still owes an explanation, because "no clip was created" is a
+            // surprising answer to a create that was dispatched and acknowledged: at v25 that
+            // dispatch was a no-op, and the caller is told so rather than left to infer it from
+            // a clipCreated they may not have read (IN-05).
+            if (Boolean.FALSE.equals(clip.slotWasEmpty)) {
+                return "the slot already held content before this write, so no clip was created"
+                    + " and nothing was removed";
+            }
             return null;
         }
         if (Boolean.TRUE.equals(clip.slotWasEmpty)) {
             return "the clip this write created was left in place: clip/delete did not succeed";
         }
-        if (Boolean.FALSE.equals(clip.slotWasEmpty)) {
-            return "the slot already held content before this write, so nothing was removed";
+        // There is no FALSE branch here any more, and its absence is deliberate rather than an
+        // omission: `created` is derived from `slotWasEmpty`, so a proven-occupied slot has
+        // already returned above with the reason that says BOTH facts. A second spelling of it
+        // here would be a second source of truth for one fact.
+        //
+        // Three ways of not having proved it, and they are different facts rather than degrees of
+        // one -- which is the whole reason the unproven answer is a null and not a false. A
+        // coordinate that never resolved is a different problem from a slot nothing has ever
+        // looked at, and both are different from a reading that exists but predates this write.
+        if (clip.bankSlot < 0) {
+            return "the slot's coordinate could not be resolved, so nothing was removed";
         }
-        return "the slot's emptiness was never observed, so nothing was removed";
+        if (clip.slotReadBeforeCreate == null) {
+            return "the slot's emptiness was never observed, so nothing was removed";
+        }
+        return "the slot's emptiness was observed only before this write began, so it could not"
+            + " be proven current and nothing was removed";
     }
 
     /** The refusal console line's closing sentence: what actually happened to the slot. */
     private static String slotOutcome(ClipWrite clip, boolean clipRemoved, String leftoverReason) {
-        if (!clip.created) {
+        if (Boolean.FALSE.equals(clip.created)) {
             return "No clip was created at " + clip.label() + ".";
+        }
+        if (clip.created == null) {
+            return "Whether a clip was created at " + clip.label() + " could not be proven: "
+                + leftoverReason + ".";
         }
         if (clipRemoved) {
             return "The empty clip this write created at " + clip.label() + " was removed.";
@@ -1426,9 +2286,42 @@ public class MacroHandler {
         }
     }
 
+    /**
+     * Publish an observation sequence, or JSON null when the slot has never been observed.
+     *
+     * <p>Zero is {@code StateCache}'s internal spelling of "no observer callback has ever landed
+     * here" and must not leave the engine as a number: a caller reading {@code slotObservedAt: 0}
+     * would read it as a real, very old observation rather than as the absence of one. Same
+     * discipline as {@link #addPosition}, for the same reason.
+     */
+    private static void addObservationSeq(JsonObject data, String key, long value) {
+        if (value <= 0) {
+            data.add(key, JsonNull.INSTANCE);
+        } else {
+            data.addProperty(key, value);
+        }
+    }
+
+    /**
+     * Publish {@code clipCreated}, or JSON null when it could not be proven either way.
+     *
+     * <p>The one place the three states of {@link ClipWrite#created} are turned into wire form,
+     * so every path that reports it reports it the same way. Same discipline as
+     * {@link #addPosition} and {@link #addObservationSeq}: the key is always present, an absence
+     * is an explicit null, and an unproven answer is never collapsed into a {@code false}.
+     */
+    private static void addCreated(JsonObject data, ClipWrite clip) {
+        if (clip.created == null) {
+            data.add("clipCreated", JsonNull.INSTANCE);
+        } else {
+            data.addProperty("clipCreated", clip.created);
+        }
+    }
+
     private void refuseExpressions(WriteJob job, ClipWrite clip, int cursorTrack, int cursorScene) {
         String timestamp = java.time.Instant.now().toString();
         stateCache.recordWriteClipRefusal();
+        settleSlotEvidence(job, clip);
 
         errorLog.accept(MARKER_CURSOR_MISMATCH + " " + timestamp + " " + job.method
             + " code=" + JsonRpcError.CURSOR_MISMATCH
@@ -1457,7 +2350,7 @@ public class MacroHandler {
         // on this path -- the notes LANDED, and removing the clip would delete them.
         JsonObject result = landedPayload(job);
         result.addProperty("expressions", "refused");
-        result.addProperty("clipCreated", clip.created);
+        addCreated(result, clip);
         result.addProperty("clipRemoved", false);
         completePending(job, result);
         finishJob(job);
@@ -1467,6 +2360,7 @@ public class MacroHandler {
         String timestamp = java.time.Instant.now().toString();
         String reason = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getName();
         stateCache.recordWriteClipRefusal();
+        settleSlotEvidence(job, clip);
 
         errorLog.accept(MARKER_NOTE_WRITE_FAILED + " " + timestamp + " " + job.method
             + " code=" + JsonRpcError.NOTE_WRITE_FAILED
@@ -1489,11 +2383,15 @@ public class MacroHandler {
         data.addProperty("requestedScene", clip.sceneIndex);
         data.addProperty("reason", reason);
         data.addProperty("finding", "TODO-WRONG-SLOT");
-        data.addProperty("clipCreated", clip.created);
+        addCreated(data, clip);
         data.addProperty("clipRemoved", false);
-        data.addProperty("leftoverReason", clip.created
-            ? "a failed write may have written something, so this path removes nothing"
-            : null);
+        // Boolean.FALSE.equals rather than a bare negation, because `created` is three-state
+        // since plan 31-05 and the unproven state belongs with the created one here: if nobody
+        // can say whether a clip is at that slot, the caller still needs to be told why nothing
+        // was removed from it.
+        data.addProperty("leftoverReason", Boolean.FALSE.equals(clip.created)
+            ? null
+            : "a failed write may have written something, so this path removes nothing");
         completePending(job, JsonRpcError.NOTE_WRITE_FAILED,
             "the cursor was on the named slot and the write itself failed: " + reason, data);
         finishJob(job);

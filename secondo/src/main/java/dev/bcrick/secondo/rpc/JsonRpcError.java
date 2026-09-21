@@ -13,7 +13,12 @@ public final class JsonRpcError {
     public static final int TRANSACTION_STEP_FAILED = -32010;
 
     // The three launcher-write codes. -32011 and -32012 are D-23-07 reading (a) (Phase 23, plan
-    // 23-08, 2026-09-13); -32013 is Phase 29, plan 29-02 (2026-09-19).
+    // 23-08, 2026-09-13); -32013 arrived in Phase 29, plan 29-02 (2026-09-19). The verb in
+    // that last clause was the present tense, which here is an attribution and was never a
+    // stale claim -- but ENGINE-PIN.md Entry 3 defines its own discharge as a git grep for
+    // that present-tense phrase returning NOTHING across secondo/src, and the grep matched
+    // this line as well as the one the entry was written about. Reworded by plan 31-07 so
+    // the entry is discharged by its own test rather than in spite of it.
     //
     // WHAT WAS TRUE FROM THE SIXTH PIN MOVE UNTIL THE FOURTEENTH, recorded in the past tense
     // rather than deleted, because the paragraph that was believed is half of the record and a

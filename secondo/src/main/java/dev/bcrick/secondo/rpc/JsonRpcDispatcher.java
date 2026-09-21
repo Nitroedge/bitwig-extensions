@@ -85,6 +85,77 @@ public class JsonRpcDispatcher {
     // registered methods. The 339 that will never defer are unaffected and cannot acquire it.
     // ---------------------------------------------------------------------------------------
 
+    /**
+     * THE WALL THE CALLER ACTUALLY EXPERIENCES, in milliseconds.
+     *
+     * <p>BOTH ENDS AGREE ON THIS FIGURE, which is the only reason it can be written down here as
+     * one number: {@code HttpRpcServer.TIMEOUT_MS} is 5000 and is the argument to the
+     * {@code future.get(TIMEOUT_MS, MILLISECONDS)} that bounds an HTTP request, and the Python
+     * client's {@code RPC_TIMEOUT} in {@code src/secondo/rpc_client.py} is
+     * {@code httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=5.0)} -- the same five seconds
+     * from the other side of the repository boundary. Neither end is authoritative over the other;
+     * they are two statements of one contract, and this constant is the engine's reading of it.
+     *
+     * <p>IT STARTS ON ARRIVAL. That is the whole of WR-04: a handler's own start is a different
+     * instant, later by however long the command waited for the next {@code flush()}, so a promise
+     * measured from the handler is not a promise about this wall at all.
+     */
+    public static final long CALLER_WALL_MS = 5000;
+
+    /**
+     * Held back from {@link #CALLER_WALL_MS} before any budget is offered to a handler.
+     *
+     * <p>The stamp is taken when the request reaches {@code CommandQueue.enqueue}, which is AFTER
+     * the client wrote the bytes, after the TCP and HTTP handshakes, and after the server thread
+     * picked the request up; and the answer still has to be serialised and written back once the
+     * handler is done. None of that is inside the measurement, so none of it may be inside the
+     * budget. Half a second is deliberately generous: the cost of holding it back is that a
+     * deferral is declined slightly sooner than strictly necessary, and the cost of not holding it
+     * back is the bodiless HTTP 500 with no id this whole mechanism exists to avoid.
+     */
+    public static final long WALL_SAFETY_MARGIN_MS = 500;
+
+    /**
+     * The arrival stamp of the request now being executed. Meaningful only while
+     * {@link #currentRequestTimed} is true.
+     */
+    private long currentRequestEnqueuedNanos;
+
+    /**
+     * Whether an arrival stamp is known for the request now being executed.
+     *
+     * <p>False for a dispatch that never came through {@link #handle(String, long)} at all -- the
+     * direct {@code handleInternal} calls a test or {@code session/transaction} makes. Those have
+     * no queue wait to account for, and a missing stamp must read as "no wait measured" rather
+     * than as an elapsed time since the JVM started, which is what a bare zero would mean.
+     */
+    private boolean currentRequestTimed;
+
+    /**
+     * How long the request now being executed has been alive, measured from its arrival.
+     *
+     * <p>Includes the queue wait AND whatever this handler has spent so far, which is correct:
+     * both have already been taken off the caller's wall by the time a handler asks.
+     */
+    public long queuedMs() {
+        if (!currentRequestTimed) {
+            return 0L;
+        }
+        return (System.nanoTime() - currentRequestEnqueuedNanos) / 1_000_000L;
+    }
+
+    /**
+     * What is left of the caller's wall, in milliseconds, for the request now being executed.
+     *
+     * <p>A handler that is about to promise an answer later asks this first and arms its deadline
+     * no later than the number it gets back. It can be negative, and a negative reading is a real
+     * answer: the caller's wall has already been spent and nothing this engine does now can reach
+     * them.
+     */
+    public long remainingBudgetMs() {
+        return CALLER_WALL_MS - WALL_SAFETY_MARGIN_MS - queuedMs();
+    }
+
     /** The id of the top-level, non-notification request currently in a handler. Null otherwise. */
     private JsonElement currentRequestId;
 
@@ -259,6 +330,32 @@ public class JsonRpcDispatcher {
      * response and will answer from a scheduled task on a later flush.
      */
     public String handle(String json) {
+        // No queue was involved, so nothing has been spent on the caller's wall yet.
+        return handle(json, System.nanoTime());
+    }
+
+    /**
+     * Handle a raw JSON-RPC request string that arrived at {@code enqueuedNanos}.
+     *
+     * <p>The stamp is what {@link #remainingBudgetMs()} measures from, and it is threaded in from
+     * {@code CommandQueue} rather than read here because here is already too late: by the time
+     * this runs, the command has waited for a flush and the caller's wall has been running the
+     * whole time (29-REVIEW.md, WR-04).
+     */
+    public String handle(String json, long enqueuedNanos) {
+        long savedEnqueuedNanos = currentRequestEnqueuedNanos;
+        boolean savedTimed = currentRequestTimed;
+        currentRequestEnqueuedNanos = enqueuedNanos;
+        currentRequestTimed = true;
+        try {
+            return handleTimed(json);
+        } finally {
+            currentRequestEnqueuedNanos = savedEnqueuedNanos;
+            currentRequestTimed = savedTimed;
+        }
+    }
+
+    private String handleTimed(String json) {
         deferralTaken = false;
         JsonElement parsed;
         try {

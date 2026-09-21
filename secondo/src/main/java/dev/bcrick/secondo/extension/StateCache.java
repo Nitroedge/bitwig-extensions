@@ -15,6 +15,7 @@ import com.bitwig.extension.controller.api.*;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import dev.bcrick.secondo.handlers.TrackBankManager;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -89,6 +90,54 @@ public class StateCache {
     // that a refusal DELETES on it. This parallel array is what makes "never observed"
     // distinguishable from "observed empty", so the undo can withhold rather than guess.
     private final boolean[][] clipHasContentObserved = new boolean[TRACK_COUNT][SCENE_COUNT];
+
+    /**
+     * WHEN each slot was last observed, as a monotonic sequence rather than as a latch.
+     *
+     * <p>The flag above answers "has this slot EVER been observed?", which is the question plan
+     * 29-03 needed and NOT the question D-29-11 asked. Bitwig fires every slot's observers at
+     * init, so after startup that flag is permanently true for every in-range slot, and
+     * "the observation is confidently fresh" was therefore never actually implemented
+     * (29-REVIEW.md, WR-01). A number can answer it where a latch cannot: a caller records
+     * {@link #currentObservationTick()} at the moment it acts, and an observation is NEWER than
+     * that act only when this slot's entry has since passed it. Zero means never observed, and
+     * cannot collide with a real observation because the tick is pre-incremented.
+     *
+     * <p>Written ONLY inside the two observer lambdas in {@link #registerClipObservers}, in the
+     * same statement group that assigns the value, for the reason the comment there already
+     * gives. A second writer in a parallel bookkeeping path can drift from the value it claims to
+     * date, and a freshness stamp that has drifted is worse than no freshness stamp at all.
+     */
+    private final long[][] clipObservationSeq = new long[TRACK_COUNT][SCENE_COUNT];
+
+    /**
+     * The source of the sequence above, pre-incremented by every clip observer callback that
+     * lands.
+     *
+     * <p>{@code volatile} like the other cross-read scalars in this class, though every write and
+     * every read of it happens on the one Control Surface Session thread.
+     */
+    private volatile long observationTick;
+
+    /**
+     * The one resolver that turns a caller's PUBLIC track index into the PHYSICAL flat-bank slot
+     * every clip array in this class is keyed on, or null until {@link #setTrackBankManager} has
+     * run.
+     *
+     * <p>{@link #registerClipObservers} is handed the canonical FLAT bank, so
+     * {@code clipNames[i][j]} and {@code clipHasContent[i][j]} are subscripted by bank slot, while
+     * {@code clip/create}, {@code clip/delete} and {@code clip/select} resolve the caller's public
+     * index through {@code TrackBankManager}. Whenever the two differ -- a collapsed group, a
+     * scrolled bank -- a reader that skips the resolution is asking about a different track from
+     * the one the write touched (29-REVIEW.md, WR-02).
+     *
+     * <p>It is held HERE rather than passed into each reader so that the resolution sits beside
+     * the arrays it resolves for, which is where the next reader will look for it, and so that
+     * {@code MacroHandler}'s two constructors -- and therefore three test classes' setups -- stay
+     * as they are.
+     */
+    private volatile TrackBankManager trackBankManager;
+
     private final boolean[][] clipIsPlaying = new boolean[TRACK_COUNT][SCENE_COUNT];
     private final boolean[][] clipIsRecording = new boolean[TRACK_COUNT][SCENE_COUNT];
     private final boolean[][] clipIsPlaybackQueued = new boolean[TRACK_COUNT][SCENE_COUNT];
@@ -625,6 +674,7 @@ public class StateCache {
             // cannot drift: anything that reports a has-content value has, by definition,
             // observed that slot.
             slotBank.addHasContentObserver((IndexedBooleanValueChangedCallback) (slotIndex, value) -> {
+                clipObservationSeq[trackIdx][slotIndex] = ++observationTick;
                 clipHasContent[trackIdx][slotIndex] = value;
                 clipHasContentObserved[trackIdx][slotIndex] = true;
             });
@@ -635,8 +685,15 @@ public class StateCache {
             slotBank.addIsRecordingObserver((IndexedBooleanValueChangedCallback) (slotIndex, value) ->
                 clipIsRecording[trackIdx][slotIndex] = value);
 
-            slotBank.addNameObserver((IndexedStringValueChangedCallback) (slotIndex, value) ->
-                clipNames[trackIdx][slotIndex] = value);
+            // The witness an identity proof is taken through: this slot's OWN published name,
+            // reported by the launcher rather than by the cursor. The sequence is raised BEFORE
+            // the value it dates, in both lambdas, so that no reader can see a value newer than
+            // the number licensing it; on this one thread the two statements are indivisible
+            // anyway.
+            slotBank.addNameObserver((IndexedStringValueChangedCallback) (slotIndex, value) -> {
+                clipObservationSeq[trackIdx][slotIndex] = ++observationTick;
+                clipNames[trackIdx][slotIndex] = value;
+            });
 
             // Playback state observer for queued states
             slotBank.addPlaybackStateObserver((ClipLauncherSlotBankPlaybackStateChangedCallback)
@@ -1502,6 +1559,90 @@ public class StateCache {
     public boolean clipSlotInRange(int trackIndex, int slotIndex) {
         return trackIndex >= 0 && trackIndex < TRACK_COUNT
             && slotIndex >= 0 && slotIndex < SCENE_COUNT;
+    }
+
+    /**
+     * Wire in the one resolver this cache resolves public track indexes through. Called once,
+     * from the extension's initialization, where both objects already exist.
+     */
+    public void setTrackBankManager(TrackBankManager manager) {
+        this.trackBankManager = manager;
+    }
+
+    /**
+     * Resolve a caller's PUBLIC track index to the PHYSICAL bank slot every clip array here is
+     * keyed on, or {@code -1} when it cannot be resolved.
+     *
+     * <p>Minus one is the UNPROVEN answer, and a caller's job is to treat it as unproven rather
+     * than as slot zero. It means either that no resolver has been wired in, or that the resolver
+     * refused the index as out of range -- a refusal that arrives as an exception from
+     * {@code TrackBankManager#canonicalBankSlot} and is caught here rather than allowed to escape
+     * into a Bitwig flush, where it would take the whole callback down with it.
+     */
+    public int resolveCanonicalBankSlot(int publicTrackIndex) {
+        TrackBankManager manager = this.trackBankManager;
+        if (manager == null) {
+            return -1;
+        }
+        try {
+            return manager.canonicalBankSlot(publicTrackIndex);
+        } catch (RuntimeException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * The name this slot's OWN launcher name observer last published, addressed by PHYSICAL BANK
+     * SLOT -- the flat bank subscript -- and never by public track index.
+     *
+     * <p>Null when the coordinate is out of range, and null when no name observer has ever fired
+     * for it. The absence is exposed rather than replaced with an empty string because an empty
+     * string is a real name a slot can have, and the two must not share a spelling. The snapshot
+     * builder does substitute {@code ""}, deliberately, for a reader that only displays it; a
+     * reader that PROVES something on the answer needs the difference.
+     */
+    public String getClipNameAtBankSlot(int bankSlot, int sceneIndex) {
+        if (!clipSlotInRange(bankSlot, sceneIndex)) {
+            return null;
+        }
+        return clipNames[bankSlot][sceneIndex];
+    }
+
+    /**
+     * How fresh this slot's cached facts are, addressed by PHYSICAL BANK SLOT -- the flat bank
+     * subscript -- and never by public track index: the tick at the last observer callback that
+     * landed on it, or {@code 0} when none ever has.
+     */
+    public long getClipObservationSeqAtBankSlot(int bankSlot, int sceneIndex) {
+        if (!clipSlotInRange(bankSlot, sceneIndex)) {
+            return 0;
+        }
+        return clipObservationSeq[bankSlot][sceneIndex];
+    }
+
+    /**
+     * The observation counter as it stands now. It takes no coordinate: it is the number a caller
+     * records BEFORE it acts, so that "this slot has been observed since" becomes a comparison
+     * against a slot's own entry rather than a guess about staleness.
+     */
+    public long currentObservationTick() {
+        return observationTick;
+    }
+
+    /**
+     * Every slot's cached name as it stands now, as a copy nothing else holds a reference to,
+     * subscripted by PHYSICAL BANK SLOT in its first dimension and scene index in its second.
+     *
+     * <p>For the caller that has to know what every slot was called a moment ago -- the one that
+     * is about to mutate a name and may have to put it back. The copy is defensive in both
+     * dimensions: mutating the returned array cannot reach the cache.
+     */
+    public String[][] snapshotClipNames() {
+        String[][] copy = new String[TRACK_COUNT][];
+        for (int i = 0; i < TRACK_COUNT; i++) {
+            copy[i] = java.util.Arrays.copyOf(clipNames[i], SCENE_COUNT);
+        }
+        return copy;
     }
 
     public void setClipStepSize(double stepSize) {

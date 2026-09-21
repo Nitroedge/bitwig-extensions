@@ -13,10 +13,12 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import dev.bcrick.secondo.rpc.TaskScheduler;
 
 import static dev.bcrick.secondo.rpc.JsonParamValidator.requireArray;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -439,15 +441,23 @@ public final class ParkedRemoteControls {
      * and the name of the field that was wrong. The review marked this advisory; it is
      * load-bearing now, because the Python side discriminates on the code.
      *
-     * <p>The three loops AFTER the first one re-read those same fields raw, deliberately and
-     * safely: the first loop returns only when every element and every numeric field in the whole
-     * payload has been checked, and nothing mutates the payload in between.
+     * <p>EVERY NUMERIC INDEX IS READ EXACTLY ONCE, IN THE FIRST LOOP (WR-06). The type check
+     * above proves only that {@code pageIndex} and {@code index} ARE numbers, and {@code getAsInt}
+     * then narrowed them silently: {@code 1.5} became page 1, {@code 2.9} became control 2, and
+     * {@code 4294967297} became 1. Each of those passes the range check that follows it and writes
+     * to a control the caller never named -- the drifted write T-27-22 refuses, reached through
+     * input validation rather than through a moved cursor. {@link #requireIntegral} converts
+     * through {@code BigDecimal#intValueExact} instead, so a fraction or an overflow is an
+     * {@code IllegalArgumentException} naming the field; and the three loops AFTER the first one
+     * now read the VALIDATED value out of {@link ValidatedPage} rather than re-reading the raw
+     * element, so one check per field covers every read of that field.
      */
     public JsonObject writeValues(JsonArray payload) {
         if (payload.isEmpty()) {
             throw new IllegalArgumentException("pages array must not be empty");
         }
         int totalParams = 0;
+        List<ValidatedPage> validated = new ArrayList<>(payload.size());
         // The device/setParameters validation block, with its messages unchanged -- and, since
         // WR-10, every raw accessor in it guarded before it reads (see the method javadoc).
         for (JsonElement pageEl : payload) {
@@ -458,15 +468,14 @@ public final class ParkedRemoteControls {
             if (!page.has("pageIndex")) {
                 throw new IllegalArgumentException("each page must have 'pageIndex'");
             }
-            JsonElement pageIndexEl = page.get("pageIndex");
-            if (!pageIndexEl.isJsonPrimitive() || !pageIndexEl.getAsJsonPrimitive().isNumber()) {
-                throw new IllegalArgumentException(
-                    "'pageIndex' must be a number, got " + pageIndexEl);
-            }
+            int pageIndex = requireIntegral(page.get("pageIndex"), "pageIndex");
             JsonArray pageParams = requireArray(page, "params");
             if (pageParams.isEmpty()) {
                 throw new IllegalArgumentException("each page must have a non-empty 'params' array");
             }
+            int[] controlIndexes = new int[pageParams.size()];
+            double[] values = new double[pageParams.size()];
+            int nextControl = 0;
             for (JsonElement paramEl : pageParams) {
                 if (!paramEl.isJsonObject()) {
                     throw new IllegalArgumentException(
@@ -476,41 +485,36 @@ public final class ParkedRemoteControls {
                 if (!p.has("index") || !p.has("value")) {
                     throw new IllegalArgumentException("each param must have 'index' and 'value'");
                 }
-                JsonElement indexEl = p.get("index");
-                if (!indexEl.isJsonPrimitive() || !indexEl.getAsJsonPrimitive().isNumber()) {
-                    throw new IllegalArgumentException("'index' must be a number, got " + indexEl);
-                }
-                int idx = indexEl.getAsInt();
+                int idx = requireIntegral(p.get("index"), "index");
                 if (idx < 0 || idx >= CONTROLS_PER_PAGE) {
                     throw new IllegalArgumentException("parameter index out of range: 0-7, got " + idx);
                 }
-                JsonElement valueEl = p.get("value");
-                if (!valueEl.isJsonPrimitive() || !valueEl.getAsJsonPrimitive().isNumber()) {
-                    throw new IllegalArgumentException("'value' must be a number, got " + valueEl);
-                }
-                double val = valueEl.getAsDouble();
+                double val = requireNumber(p.get("value"), "value").getAsDouble();
                 if (val < 0.0 || val > 1.0) {
                     throw new IllegalArgumentException("parameter value out of range: 0.0-1.0, got " + val);
                 }
+                controlIndexes[nextControl] = idx;
+                values[nextControl] = val;
+                nextControl++;
                 totalParams++;
             }
+            validated.add(new ValidatedPage(pageIndex, controlIndexes, values));
         }
 
         int reachable = reachable(observedPageCount());
-        for (JsonElement pageEl : payload) {
-            int pageIndex = pageEl.getAsJsonObject().get("pageIndex").getAsInt();
-            if (pageIndex < 0 || pageIndex >= reachable) {
-                throw new IllegalArgumentException("REMOTE_PAGE_OUT_OF_REACH: page " + pageIndex);
+        for (ValidatedPage validatedPage : validated) {
+            if (validatedPage.pageIndex < 0 || validatedPage.pageIndex >= reachable) {
+                throw new IllegalArgumentException(
+                    "REMOTE_PAGE_OUT_OF_REACH: page " + validatedPage.pageIndex);
             }
         }
 
         Integer firstUnparked = null;
-        for (JsonElement pageEl : payload) {
-            int pageIndex = pageEl.getAsJsonObject().get("pageIndex").getAsInt();
-            ParkedPage page = pages[pageIndex];
+        for (ValidatedPage validatedPage : validated) {
+            ParkedPage page = pages[validatedPage.pageIndex];
             if (!page.parked()) {
                 page.scheduleRepark();
-                if (firstUnparked == null) firstUnparked = pageIndex;
+                if (firstUnparked == null) firstUnparked = validatedPage.pageIndex;
             }
         }
         if (firstUnparked != null) {
@@ -519,13 +523,11 @@ public final class ParkedRemoteControls {
             throw new IllegalStateException("REMOTE_PAGE_NOT_PARKED: page " + firstUnparked);
         }
 
-        for (JsonElement pageEl : payload) {
-            JsonObject page = pageEl.getAsJsonObject();
-            CursorRemoteControlsPage cursor = pages[page.get("pageIndex").getAsInt()].cursor;
-            for (JsonElement paramEl : page.getAsJsonArray("params")) {
-                JsonObject p = paramEl.getAsJsonObject();
-                cursor.getParameter(p.get("index").getAsInt())
-                    .value().setImmediately(p.get("value").getAsDouble());
+        for (ValidatedPage validatedPage : validated) {
+            CursorRemoteControlsPage cursor = pages[validatedPage.pageIndex].cursor;
+            for (int i = 0; i < validatedPage.controlIndexes.length; i++) {
+                cursor.getParameter(validatedPage.controlIndexes[i])
+                    .value().setImmediately(validatedPage.values[i]);
             }
         }
 
@@ -534,5 +536,61 @@ public final class ParkedRemoteControls {
         result.addProperty("pageCount", payload.size());
         result.addProperty("paramCount", totalParams);
         return result;
+    }
+
+    /**
+     * One page's coordinates AFTER validation, read once in {@link #writeValues}' first loop and
+     * reused by every loop after it.
+     *
+     * <p>The three later loops used to re-read {@code pageIndex} and {@code index} out of the raw
+     * payload. That was safe only while every read narrowed the same way; the moment one read
+     * validates and the others do not, the check and the write address different controls. One
+     * read, carried forward, is what makes "one check per field" true rather than intended.
+     */
+    private static final class ValidatedPage {
+        final int pageIndex;
+        final int[] controlIndexes;
+        final double[] values;
+
+        ValidatedPage(int pageIndex, int[] controlIndexes, double[] values) {
+            this.pageIndex = pageIndex;
+            this.controlIndexes = controlIndexes;
+            this.values = values;
+        }
+    }
+
+    /**
+     * THE ONE SPELLING of "that field is not a number" on this route (WR-10).
+     *
+     * <p>Extracted so {@link #requireIntegral} and the {@code value} read share it rather than
+     * restating it. Two spellings of one refusal is a defect in waiting: a reader at the other end
+     * of the wire has to learn both, and only one of them ever gets tested.
+     */
+    private static JsonPrimitive requireNumber(JsonElement el, String field) {
+        if (el == null || !el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException("'" + field + "' must be a number, got " + el);
+        }
+        return el.getAsJsonPrimitive();
+    }
+
+    /**
+     * A numeric field that is EXACTLY an {@code int}, or an {@code IllegalArgumentException}
+     * naming the field (WR-06).
+     *
+     * <p>{@code getAsInt} narrows without complaint, and the range check that follows it then
+     * passes on the narrowed value: {@code 1.5} becomes page 1, {@code 2.9} becomes control 2 and
+     * {@code 4294967297} becomes 1, and the call writes to a control the caller did not name.
+     * {@code BigDecimal#intValueExact} refuses both a non-zero fractional part and a value outside
+     * the int range. It still ACCEPTS an integral value written with a decimal point
+     * ({@code 1.0}), which {@code getAsInt} accepted before this check existed: this is a refusal
+     * that was missing, not a permission being withdrawn.
+     */
+    private static int requireIntegral(JsonElement el, String field) {
+        BigDecimal number = requireNumber(el, field).getAsBigDecimal();
+        try {
+            return number.intValueExact();
+        } catch (ArithmeticException e) {
+            throw new IllegalArgumentException("'" + field + "' must be an integer, got " + el);
+        }
     }
 }

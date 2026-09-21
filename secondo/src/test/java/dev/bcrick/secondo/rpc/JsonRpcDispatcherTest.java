@@ -186,6 +186,105 @@ class JsonRpcDispatcherTest {
         assertEquals("ok", json.get("result").getAsString());
     }
 
+    // --- The defer-then-throw withdrawal (29-REVIEW.md, IN-04) ---
+
+    /**
+     * A handler that claims its response and then throws answers its caller EXACTLY ONCE, and the
+     * work it had already started does not keep running behind that answer.
+     *
+     * <p>WHY THIS TEST DID NOT EXIST BEFORE. {@code deferCurrentResponse} appeared in exactly one
+     * place under {@code src/test} -- {@code CommandQueueTest}'s notification contrast -- and no
+     * engine test drove a handler that deferred and then threw. The withdrawal in
+     * {@code handleSingle}'s {@code finally} was therefore reasoned about rather than exercised:
+     * without it, {@code handle(String)} answers the queue with the deferral sentinel,
+     * {@code drainAndExecute} binds a registry entry nothing will ever complete, and the error the
+     * caller is owed is discarded in favour of a hang.
+     *
+     * <p>WHAT IS ASSERTED, and against what. Both properties are read off OBSERVABLE effects
+     * rather than internals, in the style the rest of this class uses: the answer is the returned
+     * wire string, and "no queued work kept running" is a counter the stubbed work increments.
+     * The dispatcher has no way to stop a handler's side effects retroactively -- which is exactly
+     * why {@code MacroHandler} puts its enqueue last and says so in a comment at the line.
+     */
+    @Test
+    void aHandlerThatDefersAndThenThrowsAnswersOnceAndLeavesNoWorkRunning() {
+        int[] queuedWorkRuns = new int[] {0};
+        Runnable queuedWork = () -> queuedWorkRuns[0]++;
+
+        dispatcher.register("defersThenThrows", params -> {
+            dispatcher.deferCurrentResponse();
+            // Nothing is queued before the throw, because this handler is written the way
+            // MacroHandler.handleWriteClip now is: everything that can fail happens first.
+            if (params.has("queueFirst") && params.get("queueFirst").getAsBoolean()) {
+                queuedWork.run();
+            }
+            throw new IllegalStateException("threw after claiming its response");
+        });
+
+        String response = dispatcher.handle(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"defersThenThrows\",\"id\":7}");
+
+        // ONE answer, and it is a real one. Not the deferral sentinel, which would have stranded
+        // the caller, and not null, which already means notification and would ship an HTTP 204.
+        assertNotNull(response, "the caller was answered with the notification signal");
+        assertFalse(JsonRpcDispatcher.isDeferred(response),
+            "the deferral claim was not withdrawn, so the caller would wait for an answer that"
+                + " nothing will ever produce");
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(7, json.get("id").getAsInt(), "the error must carry the caller's own id");
+        JsonObject error = json.getAsJsonObject("error");
+        assertEquals(-32603, error.get("code").getAsInt());
+        assertTrue(error.get("message").getAsString().contains("threw after claiming"),
+            error.get("message").getAsString());
+
+        // And no work is running behind that answer.
+        assertEquals(0, queuedWorkRuns[0],
+            "an error answer was returned while work the handler had started kept going --"
+                + " which is the blind retry this project forbids");
+
+        // The claim really was withdrawn from the registry, not merely unused: a SECOND request
+        // that defers legitimately must get its own entry back. If the stale claim were still
+        // there, this one would bind to it.
+        dispatcher.register("defersCleanly", params -> {
+            dispatcher.deferCurrentResponse();
+            return new JsonPrimitive("discarded");
+        });
+        String deferred = dispatcher.handle(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"defersCleanly\",\"id\":8}");
+        assertTrue(JsonRpcDispatcher.isDeferred(deferred),
+            "a later legitimate deferral was refused, so the withdrawn claim left the registry"
+                + " in a state the next request inherited");
+    }
+
+    /**
+     * The contrast that makes the assertion above mean something: work queued BEFORE the throw
+     * does keep running, and the caller still gets the error.
+     *
+     * <p>This is the shape IN-04 warns about, built deliberately so the rule is visible rather
+     * than assumed. The dispatcher cannot undo a side effect; only ordering inside the handler
+     * can. That is why {@code MacroHandler.handleWriteClip} ends with its enqueue and carries the
+     * one-sentence rule at that line.
+     */
+    @Test
+    void workQueuedBeforeAThrowKeepsRunningBehindTheErrorAnswerWhichIsWhyOrderingIsTheFix() {
+        int[] queuedWorkRuns = new int[] {0};
+        dispatcher.register("queuesThenThrows", params -> {
+            dispatcher.deferCurrentResponse();
+            queuedWorkRuns[0]++;
+            throw new IllegalStateException("threw after queueing");
+        });
+
+        String response = dispatcher.handle(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"queuesThenThrows\",\"id\":9}");
+
+        JsonObject error = JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonObject("error");
+        assertEquals(-32603, error.get("code").getAsInt());
+        assertEquals(1, queuedWorkRuns[0],
+            "the dispatcher was expected to be UNABLE to unwind the handler's side effect;"
+                + " if it now can, the ordering rule in handleWriteClip can be relaxed");
+    }
+
     @Test
     void getRegisteredMethodsReturnsAll() {
         assertTrue(dispatcher.getRegisteredMethods().contains("echo"));

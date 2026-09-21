@@ -14,8 +14,14 @@ public class StateCacheTestHelper {
      * {@code private static final int TRACK_COUNT}. Tests read the constant through
      * this accessor rather than restating its value as a literal, so a future change
      * to the ceiling cannot leave an assertion behind asserting the old number.
+     *
+     * <p>Widened to {@code public} by plan 31-04, for the reason {@link #sceneCountOf(Class)} and
+     * {@link #flushDelayOf(Class)} are public: a caller that needs it lives in
+     * {@code dev.bcrick.secondo.handlers}. The three {@code MacroHandler} test classes size the
+     * {@code TrackBankManager} they install on the cache's own ceiling rather than restating 16,
+     * which is the whole purpose of this reader.
      */
-    static int trackCountOf(Class<?> owner) {
+    public static int trackCountOf(Class<?> owner) {
         try {
             Field field = owner.getDeclaredField("TRACK_COUNT");
             field.setAccessible(true);
@@ -66,8 +72,14 @@ public class StateCacheTestHelper {
      * <p>It returns {@code long}, not {@code int}: the constant is declared {@code long}
      * because it is passed to {@code TaskScheduler.schedule(Runnable, long)}, and reading it
      * as an int would throw rather than fail with the message this guard is built to give.
+     *
+     * <p>Widened to {@code public} by plan 31-03, for the reason {@link #sceneCountOf(Class)} and
+     * {@link #setClipCursorPosition} are public: a caller that needs it lives in
+     * {@code dev.bcrick.secondo.handlers}. {@code MacroHandlerWrongSlotTest} sizes its virtual
+     * drain round on the flush hop {@code MacroHandler} actually schedules against, and the whole
+     * purpose of this reader is that a test does not restate that number as a literal.
      */
-    static long flushDelayOf(Class<?> owner) {
+    public static long flushDelayOf(Class<?> owner) {
         try {
             Field field = owner.getDeclaredField("FLUSH_DELAY_MS");
             field.setAccessible(true);
@@ -118,6 +130,77 @@ public class StateCacheTestHelper {
                                           boolean hasContent) {
         set2DArrayElement(cache, "clipHasContent", trackIndex, slotIndex, hasContent);
         set2DArrayElement(cache, "clipHasContentObserved", trackIndex, slotIndex, true);
+    }
+
+    /**
+     * Sets the name the launcher's per-slot name observer would have reported for ONE slot,
+     * addressed by PHYSICAL BANK SLOT — the flat {@code trackBank} subscript — and not by public
+     * track index.
+     *
+     * <p>The coordinate is named in that sentence rather than left to the reader because the whole
+     * class of defect Phase 31 closes is a public index used where a bank slot belongs: the two
+     * agree until a group track is collapsed or the bank is scrolled, and then they silently do
+     * not. {@code clipNames} is keyed on the bank subscript, so that is what this takes.
+     *
+     * <p>Public, like {@link #setClipCursorPosition} and {@link #setClipSlotContent}, because the
+     * handler tests that need it live in {@code dev.bcrick.secondo.handlers}.
+     */
+    public static void setClipSlotName(StateCache cache, int bankSlot, int sceneIndex, String name) {
+        set2DArrayElement(cache, "clipNames", bankSlot, sceneIndex, name);
+    }
+
+    /**
+     * Installs the resolver {@link StateCache#resolveCanonicalBankSlot(int)} answers through.
+     *
+     * <p>It exists so a test can DRIVE the canonical resolution rather than bypass it. Without a
+     * resolver the cache answers {@code -1} -- the unproven answer -- to every public track index,
+     * which is a state production is never in: the extension wires one in during initialization,
+     * at the line that registers the clip observers. A handler test that left it absent would be
+     * asserting against a coordinate space the engine does not run in, and
+     * {@code new TrackBankManager(null, 16)} resolves every in-range index to itself, which is
+     * what the tests whose banks are unscrolled want.
+     *
+     * <p>Public, like {@link #setClipCursorPosition} and {@link #setClipSlotContent}, because the
+     * handler tests that need it live in {@code dev.bcrick.secondo.handlers}.
+     */
+    public static void installTrackBankManager(StateCache cache,
+                                               dev.bcrick.secondo.handlers.TrackBankManager manager) {
+        setField(cache, "trackBankManager", manager);
+    }
+
+    /**
+     * Advances the cache's observation tick and stamps it on ONE slot, addressed by PHYSICAL BANK
+     * SLOT — the flat {@code trackBank} subscript — and not by public track index.
+     *
+     * <p>This models one observer callback landing on that slot: in production the counter is
+     * bumped inside the same lambda that assigns the value, so a test that could stamp a slot
+     * without moving the tick would be modelling a state the engine cannot reach.
+     *
+     * <p>The two fields it writes — {@code clipObservationSeq} and {@code observationTick} — are
+     * added to {@link StateCache} by plan 31-04. This helper is written at 31-03 so the harness
+     * side is ready, and it says so plainly rather than throwing a bare reflection failure if it is
+     * called before that plan lands.
+     */
+    public static void bumpClipObservationSeq(StateCache cache, int bankSlot, int sceneIndex) {
+        try {
+            Field tickField = StateCache.class.getDeclaredField("observationTick");
+            tickField.setAccessible(true);
+            long next = tickField.getLong(cache) + 1;
+            tickField.setLong(cache, next);
+
+            Field seqField = StateCache.class.getDeclaredField("clipObservationSeq");
+            seqField.setAccessible(true);
+            long[][] seq = (long[][]) seqField.get(cache);
+            seq[bankSlot][sceneIndex] = next;
+        } catch (NoSuchFieldException e) {
+            throw new UnsupportedOperationException(
+                "StateCache has no freshness counter yet: `clipObservationSeq` and"
+                    + " `observationTick` are added by plan 31-04, and nothing before that plan can"
+                    + " bump a field that does not exist.", e);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to bump clipObservationSeq[" + bankSlot + "]["
+                + sceneIndex + "]", e);
+        }
     }
 
     static void setField(StateCache cache, String fieldName, Object value) {

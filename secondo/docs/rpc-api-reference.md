@@ -3527,7 +3527,7 @@ resolved outcome, not an acknowledgement.
 
 | Method | Answers with | Why |
 |---|---|---|
-| `macro/writeClip` | the **resolved** outcome (one of four terminal paths below) | one clip, bounded by `CURSOR_VERIFY_CEILING_MS` plus one expression hop — roughly 300 ms of engine-internal scheduling |
+| `macro/writeClip` | the **resolved** outcome (one of four terminal paths below) | one clip, bounded by `CURSOR_VERIFY_CEILING_MS`, the identity proof's `STAMP_ECHO_CEILING_MS` and one expression hop — roughly 500 ms of engine-internal scheduling, and bounded above by `WRITE_WORST_CASE_MS` (550 ms). It was ~300 ms until Phase 31 added the proof |
 | `macro/buildSection` | accepted-and-queued (unchanged) | the `clips` array has no upper bound |
 | `macro/buildSong` | accepted-and-queued (unchanged) | unbounded chain |
 | `macro/setupScenes` | accepted-and-queued (unchanged) | unbounded chain |
@@ -3545,18 +3545,27 @@ null rather than an omitted key.
 
 **The DECLINED acknowledgement.** `{count, deferred: false, deferReason: "<reason>"}`. `count` is
 how many notes were ACCEPTED, never how many landed — the old contract, unchanged, and the
-response now says so in its own fields. Two reasons, told apart by the VALUE and never by prose:
+response now says so in its own fields. Three reasons, told apart by the VALUE and never by prose:
 
 - `"not-deferrable"` — the dispatcher would not let this request defer at all: it is a
   notification, a batch element, or an operation inside `session/transaction`.
 - `"queue-busy"` — deferral was available and was DECLINED at the front door, because a write
   behind another write or a chain cannot resolve in time.
+- `"late"` — deferral was available and the queue was free, and there was still not enough of
+  **your own five-second wall** left to promise an answer inside it. The engine measures from the
+  instant your request arrived, not from the instant it got round to running it, so a request that
+  waited out most of its own timeout in the queue is told at once rather than promised an answer
+  that would arrive after you had stopped listening. `"queue-busy"` wins when both hold.
 
 ##### The deferral deadline: 3000 ms, and `-32013`
 
-Every deferral that is taken is armed with a **3000 ms** deadline (`DEFERRAL_DEADLINE_MS`). It is
-a ten-times margin over the ~300 ms worst case a lone write costs, and it is strictly inside both
-five-second walls, so no caller ever hits a bodiless transport timeout with no id.
+Every deferral that is taken is armed with a deadline of **at most 3000 ms**
+(`DEFERRAL_DEADLINE_MS`), and with less than that when your own five-second wall has already been
+partly spent: the armed figure is the smaller of the constant and what is left of that wall once a
+safety margin is held back. It is a six-times margin over the ~500 ms worst case a lone write costs
+today — one hop to the verify, its re-poll, the identity proof's echo and its re-poll, and one
+closing hop — and it is strictly inside both five-second walls, so no caller ever hits a bodiless
+transport timeout with no id.
 
 When it fires, the caller is answered with `-32013 WRITE_UNRESOLVED`. **It does not mean the write
 failed.** It means the engine could not resolve it in time, so **the write may still have landed**:
@@ -3583,6 +3592,39 @@ the caller learns the same fact (the outcome is not yet known) about 2.7 seconds
 only four HTTP pool threads is not held for the whole deadline while `/health` queues behind it;
 and the answer when it finally came would have been `-32013` anyway (D-29-06).
 
+##### How a write proves it is on the slot you named (Phase 31, the fifteenth pin move)
+
+Before Phase 31 the write compared the caller's `(trackIndex, sceneIndex)` against the cursor
+clip's own observed position, re-polled to `CURSOR_VERIFY_CEILING_MS`, and wrote only on a match.
+That compare is kept and is unchanged — **but it can agree and be wrong.** At a competing
+selection about a hundred milliseconds into a write, the cursor clip has already re-pointed while
+the observers still report where the write put it: the compare matches, the notes go to the new
+cursor clip, an empty unnamed clip is left at the slot you named, and the engine calls the whole
+thing a success. That is measured, not feared: `31-ECHO-MEASUREMENT.md`'s 100 ms row reproduced it
+against a running Bitwig, with the response claiming `landed: t7s4` while the notes were at
+`t7s5`.
+
+So the compare is now the cheap filter in FRONT of an identity proof:
+
+1. **The stamp.** Before any note is dispatched, the engine writes a unique token through the
+   cursor as the clip's name.
+2. **The witness.** The slot **you named** must report that exact token through its own launcher
+   name observer — a witness fed by the launcher and wholly independent of the cursor — on an
+   observation newer than the stamp. The budget for that echo is `STAMP_ECHO_CEILING_MS` (200 ms):
+   the echo measured live at one flush and 125 ms, plus one flush of headroom.
+3. **Only then the notes.** The proof comes BEFORE the payload, so a failed proof has written
+   nothing anywhere, and the refusal and the undo below apply unchanged.
+
+**The stamp is a rename, so it is put back.** Every slot name is snapshotted before the stamp, and
+the prior name is restored when the proof fails. The response says whether the put-back was
+**proven** rather than merely attempted (`stampRestored`), and where the token was actually found
+if it landed somewhere else (`stampLeftAt`). On a success where you named no clip, the pre-stamp
+name is restored too — the proof does not cost you a clip name.
+
+**What you see on the wire.** A failed proof is the same `-32011` refusal a failed compare is:
+same code, same undo, same shape. `refusalReason` is what tells them apart — `"cursor-position"`
+when the compare never agreed, `"stamp-echo"` when it agreed and the proof did not.
+
 ##### The three codes, their meanings and their `data` shapes
 
 Every key listed is **ALWAYS present**, and is **JSON null** when the engine did not observe it.
@@ -3601,11 +3643,15 @@ on. It is never retried onto a different slot and never written with a warning.
 | `requestedScene` | integer | the scene you named |
 | `cursorTrack` | integer or **null** | where the launcher cursor clip actually was; null when never observed |
 | `cursorScene` | integer or **null** | the same, for the scene; null when never observed |
-| `ceilingMs` | integer | `250` — how long the cursor was given to agree |
+| `ceilingMs` | integer | `250` for the cursor-position compare, `200` for the identity proof — how long the cursor was given |
+| `refusalReason` | string | `"cursor-position"` or `"stamp-echo"` — which of the two triggers fired |
 | `finding` | string | `"TODO-WRONG-SLOT"` — which finding this refusal belongs to |
-| `clipCreated` | boolean | whether this write created a clip at the named slot |
+| `clipCreated` | boolean or **null** | whether this write created a clip at the named slot; **null when that could not be proven** |
 | `clipRemoved` | boolean | whether that clip was removed again |
 | `leftoverReason` | string or **null** | why a clip was LEFT at the named slot; null when nothing was left |
+| `slotObservedAt` | integer or **null** | the observation sequence the emptiness evidence was taken at; null when nothing has ever observed that slot |
+| `stampRestored` | `true` or **null** | whether the identity proof's temporary rename was PROVEN put back; null when it was not attempted or could not be proven |
+| `stampLeftAt` | string or **null** | `t<n>s<n>` — where the proof's token was found, its first number a PHYSICAL bank slot; null when no slot carried it |
 
 The `-1` sentinel the engine uses internally for "never observed" **never leaves the engine**: it
 is published as JSON null, so a refusal can never tell a user the cursor was on "track -1".
@@ -3619,7 +3665,7 @@ is published as JSON null, so a refusal can never tell a user the cursor was on 
 | `requestedScene` | integer | the scene you named |
 | `reason` | string | the underlying failure text |
 | `finding` | string | `"TODO-WRONG-SLOT"` |
-| `clipCreated` | boolean | false when `clip/create` itself threw, true when the failure came later |
+| `clipCreated` | boolean or **null** | false when `clip/create` itself threw or the slot was proven to be holding content, true when the slot was proven empty and the failure came later, **null when neither could be proven** |
 | `clipRemoved` | boolean | **always false** — see below |
 | `leftoverReason` | string or **null** | `"a failed write may have written something, so this path removes nothing"`, or null when no clip was created |
 
@@ -3627,11 +3673,11 @@ is published as JSON null, so a refusal can never tell a user the cursor was on 
 
 | Key | Type | Meaning |
 |---|---|---|
-| `deadlineMs` | integer | `3000` — the deadline that fired |
+| `deadlineMs` | integer | the deadline that fired — `3000` when the request reached the engine promptly, and less when your own wall was already partly spent |
 | `requestedTrack` | integer | the track you named |
 | `requestedScene` | integer | the scene you named |
 | `noteCount` | integer | how many notes were sent |
-| `clipCreated` | boolean | whether a clip was created at the named slot |
+| `clipCreated` | boolean or **null** | whether a clip was created at the named slot; **null when that could not be proven** |
 | `clipRemoved` | boolean | **always false** — the deadline removes nothing, because it does not know what happened |
 
 ##### The fourth outcome is a SUCCESS, not an error
@@ -3649,18 +3695,30 @@ them again; apply the expressions separately if you want them.
 
 Phase 1 of the write creates a clip at the slot you named — that is what makes the slot
 addressable and what the verify then reads — so a refusal that says "nothing was written" while
-leaving an empty clip behind would be a false report. Two separate keys say what happened, rather
+leaving an empty clip behind would be a false report. Separate keys say what happened, rather
 than prose a program would have to parse:
 
 - **`clipRemoved: true`** — the clip this write created was removed again. This happens on
-  `-32011` **only**, and **only** when the named slot was proven empty before the creation: in
-  range, observed, and observed empty. The removal is addressed by your own `(trackIndex,
-  slotIndex)` through `clip/delete`, never by the cursor — the whole reason we are here is that
-  the cursor is somewhere else.
-- **`clipRemoved: false` with a `leftoverReason`** — a clip was left, and the reason says which
-  of three facts held: the slot already held content before this write; the slot's emptiness was
-  never observed; or the removal ran and did not succeed. These are different facts, not degrees
-  of one.
+  `-32011` **only**, and **only** when the named slot was proven empty before the creation, on
+  FOUR facts: the caller's track index resolved to a physical bank slot; that slot is in range;
+  its has-content observer had reported it empty; and the launcher has reported that slot again
+  on an observation **newer than the instant this write began**. Every one of the four is read at
+  the resolved bank slot — the same slot the create dispatched into and the same slot the delete
+  addresses — because on a scrolled or grouped bank the caller's public index names a different
+  track. The removal is addressed by your own `(trackIndex, slotIndex)` through `clip/delete`,
+  never by the cursor — the whole reason we are here is that the cursor is somewhere else.
+- **`clipRemoved: false` with a `leftoverReason`** — a clip may have been left, and the reason
+  says which fact held: the slot already held content before this write, so no clip was created;
+  the slot's coordinate could not be resolved; the slot's emptiness was never observed; the
+  slot's emptiness was observed only *before* this write began, so it could not be proven
+  current; or the removal ran and did not succeed. These are different facts, not degrees of one.
+- **`clipCreated: null`** — whether a clip was created could not be proven either way, which
+  happens exactly when the emptiness could not be. An unproven answer is published as an absence
+  and never as a `false`: "no clip was created" and "nobody can say" are different facts.
+- **`slotObservedAt`** — the observation sequence the emptiness evidence was taken at, so a
+  refusal says how fresh its own evidence was rather than asserting a freshness it cannot show.
+  It is `null` when nothing has ever observed that slot; a zero is never published, because a
+  zero would read as a real but very old observation rather than as the absence of one.
 
 `-32012` and `-32013` remove **nothing**, ever. A write that failed may have written something,
 and a deadline does not know what happened; neither slot's content is the engine's to delete.

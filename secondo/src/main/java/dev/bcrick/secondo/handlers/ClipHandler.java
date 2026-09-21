@@ -85,7 +85,19 @@ public class ClipHandler {
             int trackIndex = requireInt(params, "trackIndex");
             int slotIndex = requireInt(params, "slotIndex");
             boolean force = params.has("force") && params.get("force").getAsBoolean();
-            if (!force && !stateCache.clipHasContent(trackIndex, slotIndex)) {
+            // ONE COORDINATE, here too (29-REVIEW.md WR-02's defect class, one route over;
+            // scoped into this pin move by the owner at 31-02's checkpoint). StateCache's
+            // clipHasContent array is subscripted by PHYSICAL BANK SLOT, while trackIndex is the
+            // caller's PUBLIC index -- and the select three lines below resolves that public
+            // index through the very same TrackBankManager this line now goes through. While the
+            // two agree the guard protects the slot it addresses; the moment a group is collapsed
+            // or the bank is scrolled they do not, and the guard answers about a different track
+            // from the one it is guarding: an occupied slot refused as empty, or an empty one
+            // selected because its neighbour had content. Range refusal stays where CR-03 put it,
+            // in canonicalBankSlot, so an out-of-range index now says so instead of claiming the
+            // slot is empty.
+            if (!force && !stateCache.clipHasContent(
+                    trackBankManager.canonicalBankSlot(trackIndex), slotIndex)) {
                 throw new IllegalArgumentException(
                     "slot is empty at track " + trackIndex + " slot " + slotIndex
                     + " — create a clip first with clip/create");
