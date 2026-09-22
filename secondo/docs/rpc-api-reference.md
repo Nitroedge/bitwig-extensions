@@ -3614,16 +3614,56 @@ So the compare is now the cheap filter in FRONT of an identity proof:
    the echo measured live at one flush and 125 ms, plus one flush of headroom.
 3. **Only then the notes.** The proof comes BEFORE the payload, so a failed proof has written
    nothing anywhere, and the refusal and the undo below apply unchanged.
+4. **And the slot must confirm it AFTERWARDS.** The proof above establishes where the cursor
+   **was** at echo time — the echo is itself an observer reading on the flush cycle, so a
+   selection arriving between the echo and the dispatch takes the notes with it. So the same
+   witness is asked a second time, after the write: the slot you named must publish the name the
+   closing rename actually wrote, on an observation newer than that rename. The budget for that
+   second echo is `LANDING_ECHO_CEILING_MS` (200 ms), sized from the same live measurement.
+   **When it does not confirm, the write is refused rather than reported as landed** — a refusal
+   is the accepted price of never a false success.
 
 **The stamp is a rename, so it is put back.** Every slot name is snapshotted before the stamp, and
-the prior name is restored when the proof fails. The response says whether the put-back was
-**proven** rather than merely attempted (`stampRestored`), and where the token was actually found
-if it landed somewhere else (`stampLeftAt`). On a success where you named no clip, the pre-stamp
-name is restored too — the proof does not cost you a clip name.
+the prior name is restored when either proof fails. The response says whether the put-back was
+**proven** rather than merely attempted (`stampRestored`), where the token was actually found
+(`stampLeftAt`), and — when it could not be put back — **why** (`stampNotRestoredReason`). On a
+success where you named no clip, the pre-stamp name is restored too — the proof does not cost you
+a clip name.
+
+Two things the put-back deliberately will not do. It **will not rename a clip this write never
+touched**: the rename follows the cursor while the token's location came from a snapshot, so if
+the cursor has moved again nothing is dispatched and `stampNotRestoredReason` says so. And it
+**will not conclude the token landed nowhere on one look**: a publication that has not arrived
+within the ceiling is the ordinary slow case, so the engine looks once more a flush later, and
+only then reports — naming the token in `stampNotRestoredReason` so you can search your grid for
+it. Where the refusal's own undo is about to delete the clip the stamp is on, no put-back is
+attempted at all; the stamp goes with the clip.
 
 **What you see on the wire.** A failed proof is the same `-32011` refusal a failed compare is:
 same code, same undo, same shape. `refusalReason` is what tells them apart — `"cursor-position"`
-when the compare never agreed, `"stamp-echo"` when it agreed and the proof did not.
+when the compare never agreed, `"stamp-echo"` when it agreed and the proof in front of the write
+did not, `"unresolved-coordinate"` when the engine could not place the track you named at all,
+and `"landing-echo"` when the write **went out** and the slot it was addressed to never confirmed
+it.
+
+**`"landing-echo"` is the one refusal that follows a dispatched write, and it says so.** Every
+other trigger refuses with nothing on the wire, which is why the message reads "nothing was
+written". On this one the notes DID go out, so `notesDispatched` is `true`, the message says so
+instead, and `notesLandedAt` names the slot they appear to have reached when — and only when —
+exactly one slot ended up carrying the name the rename wrote. **Do not re-issue the write on a
+`landing-echo` refusal.** Read the slots back: a re-issue of a creating write puts a second copy
+of the notes in your project.
+
+**The compare happens in ONE coordinate space.** The cursor's observed pair is PROJECT-ABSOLUTE —
+a track position and a scene index, both as Bitwig itself numbers them — while the pair you send is
+a PUBLIC track index and a scene index that addresses the **bank window**. Those are the same
+numbers only while both banks sit at their origin, and `macro/buildSection` scrolls the scene bank
+itself. So the engine converts YOUR pair into the absolute space once, before it compares, and the
+refusal publishes both pairs plus the offset that reconciles them (`requestedTrackPosition`,
+`requestedSceneAbsolute`, `sceneBankOffset` below). If the conversion cannot be made — the track
+index does not resolve, or that track's position has never been observed — the write refuses
+immediately with `refusalReason: "unresolved-coordinate"` rather than comparing numbers that are
+not comparable.
 
 ##### The three codes, their meanings and their `data` shapes
 
@@ -3639,12 +3679,15 @@ on. It is never retried onto a different slot and never written with a warning.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `requestedTrack` | integer | the track you named |
-| `requestedScene` | integer | the scene you named |
-| `cursorTrack` | integer or **null** | where the launcher cursor clip actually was; null when never observed |
-| `cursorScene` | integer or **null** | the same, for the scene; null when never observed |
-| `ceilingMs` | integer | `250` for the cursor-position compare, `200` for the identity proof — how long the cursor was given |
-| `refusalReason` | string | `"cursor-position"` or `"stamp-echo"` — which of the two triggers fired |
+| `requestedTrack` | integer | the track you named — YOUR coordinate, a public track index |
+| `requestedScene` | integer | the scene you named — YOUR coordinate, a bank-window slot subscript |
+| `requestedTrackPosition` | integer or **null** | the same track as a PROJECT-ABSOLUTE position — what the engine actually compared; null when your track index could not be placed |
+| `requestedSceneAbsolute` | integer or **null** | the same scene as a PROJECT-ABSOLUTE index — what the engine actually compared. Equals `requestedScene + sceneBankOffset` |
+| `sceneBankOffset` | integer or **null** | the scene bank's scroll position at the moment of the compare: the number that reconciles `requestedScene` with `requestedSceneAbsolute`. `0` on an unscrolled session |
+| `cursorTrack` | integer or **null** | where the launcher cursor clip actually was, PROJECT-ABSOLUTE; null when never observed. Compare it against `requestedTrackPosition`, not against `requestedTrack` |
+| `cursorScene` | integer or **null** | the same, for the scene; null when never observed. Compare it against `requestedSceneAbsolute`, not against `requestedScene` |
+| `ceilingMs` | integer | `250` for the cursor-position compare, `200` for the identity proof, `200` for the landing proof — how long the engine waited, quoted from whichever budget it actually spent |
+| `refusalReason` | string | `"cursor-position"`, `"stamp-echo"`, `"unresolved-coordinate"` or `"landing-echo"` — which of the four triggers fired |
 | `finding` | string | `"TODO-WRONG-SLOT"` — which finding this refusal belongs to |
 | `clipCreated` | boolean or **null** | whether this write created a clip at the named slot; **null when that could not be proven** |
 | `clipRemoved` | boolean | whether that clip was removed again |
@@ -3652,6 +3695,9 @@ on. It is never retried onto a different slot and never written with a warning.
 | `slotObservedAt` | integer or **null** | the observation sequence the emptiness evidence was taken at; null when nothing has ever observed that slot |
 | `stampRestored` | `true` or **null** | whether the identity proof's temporary rename was PROVEN put back; null when it was not attempted or could not be proven |
 | `stampLeftAt` | string or **null** | `t<n>s<n>` — where the proof's token was found, its first number a PHYSICAL bank slot; null when no slot carried it |
+| `stampNotRestoredReason` | string or **null** | why the temporary rename could NOT be put back: the cursor had moved again, so renaming through it would have hit a clip this write never touched; or no slot had published the token even after an extra look, in which case this names the token so you can search for it. Null when the put-back succeeded, and null when it was never attempted |
+| `notesDispatched` | boolean | whether the notes actually went out on the wire. **`true` means the write WENT OUT and did not land where it was addressed** — the message's "nothing was written" does not apply, and the write must not be re-issued. `false` on the three triggers that refuse before the payload |
+| `notesLandedAt` | string or **null** | `t<n>s<n>` — where the notes appear to be, its first number a PHYSICAL bank slot. Published only when exactly one slot ended up carrying the name the rename wrote AND that slot has been observed since; null at zero matches and null at more than one, because a name you may have reused is not an identity |
 
 The `-1` sentinel the engine uses internally for "never observed" **never leaves the engine**: it
 is published as JSON null, so a refusal can never tell a user the cursor was on "track -1".

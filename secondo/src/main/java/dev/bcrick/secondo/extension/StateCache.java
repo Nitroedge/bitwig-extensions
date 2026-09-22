@@ -1592,6 +1592,79 @@ public class StateCache {
     }
 
     /**
+     * The offset between a caller's BANK-WINDOW slot subscript and a PROJECT-ABSOLUTE scene index:
+     * add it to the subscript to get the absolute index, which is what every cursor observation
+     * here is already in.
+     *
+     * <p>The value is the scene bank's own observed scroll position, published by the value
+     * observer registered on {@code sceneBank.scrollPosition()} in {@link #registerObservers}. It
+     * is an offset rather than a nullable reading -- the observer fires at initialization like every
+     * other bank observer, and a bank that has never scrolled sits at 0 -- so this accessor has no
+     * unproven answer to return.
+     */
+    public int getSceneBankOffset() {
+        return sceneBankOffset;
+    }
+
+    /**
+     * The PROJECT-ABSOLUTE track position for a caller's PUBLIC track index, or {@code -1} when it
+     * cannot be proven.
+     *
+     * <p>The argument is a public track index -- the caller's own coordinate, master excluded and
+     * missing rows closed up. The return value is a track position in the sense the Bitwig API
+     * reference defines it ({@code bitwig-api-reference.txt:3147}, "the position of the track
+     * within the list of Bitwig Studio tracks"), which is the same space
+     * {@link #getClipCursorTrackPosition()} observes in. This is the FORWARD conversion: the public
+     * index goes through {@link #resolveCanonicalBankSlot(int)} -- the one canonical resolver --
+     * and the resolved PHYSICAL BANK SLOT then subscripts the position array the per-slot
+     * {@code track.position()} observers fill. Both address the same flat bank object, so the two
+     * steps compose.
+     *
+     * <p>Minus one is the UNPROVEN answer, and a caller's job is to treat it as unproven rather
+     * than as track zero. It is returned in exactly three cases: the canonical resolver could not
+     * resolve the public index (no resolver wired in, or the index is out of range); the resolved
+     * bank slot falls outside the position array this cache models; and the resolved slot's
+     * {@code position()} observer has never fired, which the array represents as an absent entry
+     * rather than as a number.
+     */
+    public int absoluteTrackPositionForPublicIndex(int publicTrackIndex) {
+        // The second half is {@link #trackPositionAtBankSlot(int)}, and it is CALLED rather than
+        // copied (plan 31-17): the same array read, the same two unproven cases and the same
+        // sentinel now have one spelling, so a caller that already holds a bank slot and a caller
+        // that holds a public index cannot end up disagreeing about what an absent entry means.
+        return trackPositionAtBankSlot(resolveCanonicalBankSlot(publicTrackIndex));
+    }
+
+    /**
+     * The PROJECT-ABSOLUTE track position observed for a PHYSICAL BANK SLOT -- the flat bank
+     * subscript -- or {@code -1} when it cannot be proven.
+     *
+     * <p>THE ARGUMENT IS A BANK SLOT AND NEVER A PUBLIC INDEX. That is the whole difference
+     * between this and {@link #absoluteTrackPositionForPublicIndex(int)}: that one starts from
+     * the caller's coordinate and runs it through {@link #resolveCanonicalBankSlot(int)} first,
+     * while this one starts where that resolution ENDS. A caller who already holds a bank slot --
+     * because it located something in one of the clip arrays, every one of which is keyed that
+     * way -- has nothing to resolve, and resolving a bank slot as though it were a public index
+     * is the class of defect 29-REVIEW.md WR-02 is about.
+     *
+     * <p>Minus one is the UNPROVEN answer, and a caller's job is to treat it as unproven rather
+     * than as track zero. Two cases produce it, the same two the other accessor's last two cases
+     * are: the slot falls outside the position array this cache models, and the slot's
+     * {@code position()} observer has never fired, which the array represents as an absent entry
+     * rather than as a number.
+     */
+    public int trackPositionAtBankSlot(int bankSlot) {
+        if (bankSlot < 0 || bankSlot >= TRACK_COUNT) {
+            return -1;
+        }
+        Integer position = trackPositions[bankSlot];
+        if (position == null) {
+            return -1;
+        }
+        return position;
+    }
+
+    /**
      * The name this slot's OWN launcher name observer last published, addressed by PHYSICAL BANK
      * SLOT -- the flat bank subscript -- and never by public track index.
      *

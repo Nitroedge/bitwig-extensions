@@ -80,9 +80,28 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.8",
+            "0.2.9",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.8 (secondo Phase 31 cursor identity verify, plan "
+            "The engine's version is 0.2.9 (secondo Phase 31 gap round, plan 31-21; bumped "
+                + "from 0.2.8 because this build changes wire behaviour and diagnose's version "
+                + "row must be able to tell it from the build before it -- and here that row is "
+                + "the ONLY thing that can, because NOTHING IN THIS DELTA REGISTERS OR REMOVES "
+                + "A METHOD, so the dispatchable surface is expected not to move and a method "
+                + "count cannot discriminate the two builds at all. A LAUNCHER WRITE NOW PROVES "
+                + "IT LANDED, not merely that it began on the slot the caller named: "
+                + "proveWriteLanded takes a SECOND echo AFTER the notes are dispatched, asking "
+                + "the named slot's own launcher-fed name observer to confirm on an observation "
+                + "strictly newer than the closing rename, and DOWNGRADES a would-be success to "
+                + "a refusal when it never confirms. That refusal carries the FOURTH "
+                + "refusalReason, landing-echo, beside cursor-position, stamp-echo and "
+                + "unresolved-coordinate, on LANDING_ECHO_CEILING_MS -- a budget of its own, "
+                + "with neither CURSOR_VERIFY_CEILING_MS nor STAMP_ECHO_CEILING_MS widened to "
+                + "pay for it. A -32011 now carries notesDispatched, notesLandedAt and "
+                + "stampNotRestoredReason, so a refusal's standing 'nothing was written' "
+                + "reading is correctable rather than assumed; and the stamp put-back proves "
+                + "the cursor is still on the slot the token was found at, in one coordinate "
+                + "space, before renaming through it. "
+                + "0.2.8 was secondo Phase 31 cursor identity verify, plan "
                 + "31-10; bumped from 0.2.7 because this build changes wire behaviour and "
                 + "diagnose's version row must be able to tell it from the build before it, and a "
                 + "SHA is not something a caller can ask the DAW for. A LAUNCHER WRITE NOW PROVES "

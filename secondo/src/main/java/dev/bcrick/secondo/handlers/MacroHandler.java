@@ -34,8 +34,16 @@ import static dev.bcrick.secondo.rpc.JsonParamValidator.*;
  * re-polls to {@link #CURSOR_VERIFY_CEILING_MS}, and writes only on a match. A mismatch is
  * refused -- never retried onto a different slot, never written with a warning.
  *
- * <p>WHAT IS TRUE FROM PHASE 31. That compare is kept, unchanged and at its own ceiling, but it
- * is no longer the whole proof -- because it can AGREE AND BE WRONG. At a competing selection
+ * <p>WHAT IS TRUE FROM PHASE 31, AS CORRECTED BY ITS GAP ROUND. That compare still runs at its
+ * own budget, {@link #CURSOR_VERIFY_CEILING_MS}, untouched at 250 -- but WHAT it compares was
+ * WRONG and plan 31-16 corrected it (31-REVIEW.md CR-01). The cursor's observed pair is
+ * PROJECT-ABSOLUTE, a track position and a scene index; the caller's pair is a PUBLIC track index
+ * and a BANK-WINDOW slot subscript. Comparing them raw is correct only while both banks sit at the
+ * origin, and this handler scrolls the scene bank itself inside {@link #handleBuildSection}'s
+ * auto-create path -- so at any non-zero scroll the compare could never agree, every launcher
+ * write refused, and the undo deleted the clip phase 1 had just created. The caller's pair is now
+ * converted into the absolute space ONCE, at the top of {@link #verifyThenWrite}, and the compare
+ * happens there. It is also no longer the whole proof -- because it can AGREE AND BE WRONG. At a competing selection
  * about a hundred milliseconds into a write, the cursor clip has already re-pointed while the
  * observers still report where phase 1 put it: the compare matches, the notes go to the new
  * cursor clip, an empty unnamed clip is left at the slot the caller named, and the engine
@@ -224,6 +232,44 @@ public class MacroHandler {
     private static final long STAMP_ECHO_CEILING_MS = 200;
 
     /**
+     * How long the LANDING proof may wait for the named slot's own name observer to publish the
+     * caller's FINAL name -- the name the closing rename actually dispatched -- before the write
+     * is downgraded from a success to a refusal.
+     *
+     * <p>WHY A SECOND ECHO EXISTS AT ALL. {@link #STAMP_ECHO_CEILING_MS}'s proof is real and it
+     * works, but it was inserted in FRONT of the write rather than fused to it, and the echo is
+     * itself an observer reading on the flush cycle. So it establishes where the cursor WAS at
+     * echo time; the notes and the closing rename then go out through the cursor wherever it now
+     * is. The live five-point map's 150 ms row fell into exactly that window: the response
+     * asserted the named slot for three notes that were in another clip
+     * ({@code evidence/31-live-raw.json}, {@code timing_map.rows[4]}). There is no synchronous
+     * identity read at API v25, so the window cannot be made to vanish by reading harder -- what
+     * can be made true is the REPORT, and a second echo taken AFTER the dispatch, on the same
+     * independent witness, is what makes it so (D-31-25).
+     *
+     * <p>SIZED FROM THE SAME MEASUREMENT, not guessed. {@code 31-ECHO-MEASUREMENT.md} recorded
+     * {@code echo_flushes: 1} and {@code echo_elapsed_ms: 125} against a running Bitwig at this
+     * pin: a cursor-scoped {@code clip/rename} reached the slot's own published name on the FIRST
+     * look. This is that measured flush count plus one flush of headroom -- TWO polls, at
+     * {@link #FLUSH_DELAY_MS} and at twice it -- because the closing rename this proof watches is
+     * the same kind of dispatch, through the same route, read by the same observer as the stamp
+     * the measurement was taken on.
+     *
+     * <p>IT IS ITS OWN BUDGET, BEHIND THE OTHER TWO, and that is deliberate (D-31-03). Neither
+     * {@link #CURSOR_VERIFY_CEILING_MS} nor {@link #STAMP_ECHO_CEILING_MS} was widened to pay for
+     * it and {@link #FLUSH_DELAY_MS} did not move: this round ADDS a proof rather than widening
+     * one, exactly as plan 31-04 did. Sharing a counter would also leave this proof whatever the
+     * step in front of it had not already spent, which makes a budget an accident of another
+     * step's luck.
+     *
+     * <p>Exhausting it REFUSES, exactly as the two ceilings before it do -- and the refusal says
+     * that notes WERE dispatched, because on this path they were. It never re-points the cursor
+     * and writes again: a creating retry would put a second copy of the notes in the owner's
+     * music (D-31-07).
+     */
+    private static final long LANDING_ECHO_CEILING_MS = 200;
+
+    /**
      * How long a DEFERRED {@code macro/writeClip} response may stay outstanding before it is
      * answered with {@link JsonRpcError#WRITE_UNRESOLVED} rather than left to run into a
      * transport wall.
@@ -258,28 +304,56 @@ public class MacroHandler {
      * milliseconds. A deferral cannot honestly be claimed with less than this left on the caller's
      * wall.
      *
-     * <p>DERIVED BY ADDITION, NEVER WRITTEN AS A LITERAL, and that is the point of it. The figure
-     * is the sum of three budgets this class already declares, so a plan that widens any one of
-     * them moves this with it instead of leaving a stale number that reads like a measurement:
+     * <p>DERIVED BY ADDITION, NEVER WRITTEN AS A LITERAL, and that is the point of it. Every term
+     * is a budget this class already declares, so a plan that widens any one of them moves this
+     * with it instead of leaving a stale number that reads like a measurement.
+     *
+     * <p>IT IS NO LONGER ONE SUM (plan 31-17, D-31-26). The success path and the refusal path
+     * diverge after the landing proof and they do not cost the same, so the constant is the
+     * LARGER OF TWO WALKS rather than one walk that happens to bound both by luck:
      *
      * <ul>
-     *   <li>{@link #CURSOR_VERIFY_CEILING_MS} -- the position compare, including the hop that
-     *       reaches it and the re-polls it pays for;</li>
-     *   <li>{@link #STAMP_ECHO_CEILING_MS} -- the identity proof plan 31-04 added AFTER
-     *       {@link #DEFERRAL_DEADLINE_MS}'s own arithmetic was written down, which is why that
-     *       comment's "300 ms" is a smaller number than this one; and</li>
-     *   <li>one further {@link #FLUSH_DELAY_MS} for whichever hop comes last -- the expression
-     *       pass on a success, or the name restore in front of a refusal (plan 31-04).</li>
+     *   <li>THE SUCCESS SUM -- {@link #CURSOR_VERIFY_CEILING_MS}, the position compare;
+     *       {@link #STAMP_ECHO_CEILING_MS}, the identity proof plan 31-04 added;
+     *       {@link #LANDING_ECHO_CEILING_MS}, the landing proof plan 31-17 added; and one
+     *       closing {@link #FLUSH_DELAY_MS} for the expression pass.</li>
+     *   <li>THE REFUSAL SUM -- the same three ceilings, and TWO further flushes for the stamp
+     *       put-back: one for the extra look CR-03 gives a token that has not been published
+     *       anywhere yet, and one for the re-read that turns an accepted rename into an observed
+     *       fact.</li>
      * </ul>
      *
-     * <p>WALKED AGAINST THE ACTUAL CHAIN, so the sum is a bound rather than a hope. The deepest
-     * path is: phase 1 synchronously at 0; the verify hop at 100; a second compare at 200, which
-     * is the last the ceiling allows; the stamp goes out there and the echo is polled at 300 and
-     * at 400, which is the last the echo ceiling allows; and one closing hop at 500 for the
-     * restore-and-refuse or for the expressions. 500 measured, 550 budgeted.
+     * <p>{@link #DEFERRAL_DEADLINE_MS}'s own comment says "300 ms" because its arithmetic was
+     * written down before either proof existed. That figure is a smaller number than this one and
+     * is left as the dated record it is.
+     *
+     * <p>WALKED AGAINST THE ACTUAL CHAIN, so each sum is a bound rather than a hope.
+     *
+     * <p>THE SUCCESS WALK: phase 1 synchronously at 0; the verify hop at 100; a second compare at
+     * 200, which is the last {@link #CURSOR_VERIFY_CEILING_MS} allows; the stamp goes out there
+     * and its echo is polled at 300 and at 400, which is the last {@link #STAMP_ECHO_CEILING_MS}
+     * allows; the notes and the closing rename go out there and the LANDING echo is polled at 500
+     * and at 600, which is the last {@link #LANDING_ECHO_CEILING_MS} allows; and one closing hop
+     * at 700 for the expressions. 700 measured, 750 budgeted.
+     *
+     * <p>THE REFUSAL WALK, which is the deeper of the two and therefore the one this constant
+     * usually reports: everything above as far as the landing echo exhausting at 600; the stamp
+     * put-back looks for the token there and finds nothing, so CR-03's one extra look comes at
+     * 700; the put-back's rename goes out there and its proving re-read is at 800. 800 measured,
+     * 850 budgeted.
+     *
+     * <p>THE FIGURE IS OVER D-31-10's 400 ms PER-CLIP BUDGET, and was already over it at 550
+     * before this plan: the owner saw that at the fifteenth pin's delta freeze and answered
+     * freeze rather than trim (WINDOWS.md row 176). This plan's own figure is read to them again
+     * at this round's freeze rather than quietly absorbed.
      */
-    private static final long WRITE_WORST_CASE_MS =
-        CURSOR_VERIFY_CEILING_MS + STAMP_ECHO_CEILING_MS + FLUSH_DELAY_MS;
+    private static final long WRITE_WORST_CASE_MS = Math.max(
+        // THE SUCCESS WALK: compare, identity proof, landing proof, expression hop. 750.
+        CURSOR_VERIFY_CEILING_MS + STAMP_ECHO_CEILING_MS + LANDING_ECHO_CEILING_MS
+            + FLUSH_DELAY_MS,
+        // THE REFUSAL WALK: the same three ceilings, and the put-back's two flushes. 850.
+        CURSOR_VERIFY_CEILING_MS + STAMP_ECHO_CEILING_MS + LANDING_ECHO_CEILING_MS
+            + FLUSH_DELAY_MS + FLUSH_DELAY_MS);
 
     /**
      * The message {@link JsonRpcError#WRITE_UNRESOLVED} travels with.
@@ -314,6 +388,40 @@ public class MacroHandler {
 
     /** {@code refusalReason} when the position compare agreed and the identity proof did not. */
     private static final String REFUSAL_STAMP_ECHO = "stamp-echo";
+
+    /**
+     * {@code refusalReason} when the caller's own coordinate could not be put into the space the
+     * cursor is observed in, so there was nothing comparable to compare.
+     *
+     * <p>The third value, and it is a different KIND of answer from the other two: those say the
+     * cursor was somewhere else, this says the engine could not work out where the caller's track
+     * IS. Comparing anyway would mean comparing an observed absolute position against a fabricated
+     * zero, which is the failure mode {@code StateCache#absoluteTrackPositionForPublicIndex}
+     * returns its unproven sentinel to prevent. There is no re-poll on this trigger: an index the
+     * canonical resolver refuses is not going to start resolving one flush later.
+     */
+    private static final String REFUSAL_UNRESOLVED_COORDINATE = "unresolved-coordinate";
+
+    /**
+     * {@code refusalReason} when the identity proof held, the notes WERE dispatched, and the slot
+     * the caller named never published the name the closing rename wrote.
+     *
+     * <p>The fourth value, and the only one of the four that can be reached with notes already on
+     * the wire. It is a TRIGGER on the existing refusal and not a fifth outcome (D-31-25): the
+     * code, the undo, the terminal path and the response shape are the ones
+     * {@link #REFUSAL_CURSOR_POSITION} and {@link #REFUSAL_STAMP_ECHO} already use, because in
+     * every respect but the trigger this IS the same clean refusal, and a fourth error code would
+     * be a change to a published contract for a difference this key already carries.
+     *
+     * <p>DOWNGRADED FROM A SUCCESS, which is the whole point. The alternative -- reporting the
+     * write as unconfirmed -- would be honest and would still leave the phase's own criterion
+     * failed on a technicality: that criterion permits a correct write or a refusal and nothing
+     * else. So the answer becomes a refusal, and because a refusal on this path follows a
+     * dispatched write, it carries {@code notesDispatched} and, where the engine can prove it,
+     * {@code notesLandedAt}. The existing sentence -- that nothing was written -- is false here,
+     * and saying it would be the same class of defect this whole phase is about.
+     */
+    private static final String REFUSAL_LANDING_ECHO = "landing-echo";
 
     /**
      * The scene bank window width, used by {@link #handleBuildSection} to convert an absolute
@@ -1030,7 +1138,19 @@ public class MacroHandler {
         dispatcher.handleInternal("device/insertPluginDevice", pluginParams);
     }
 
-    private void writeNotesToCursor(double stepSize, JsonArray notes, String name) throws Exception {
+    /**
+     * The three cursor-scoped dispatches of a write, in order, with the two facts the landing
+     * proof needs recorded AS THEY HAPPEN.
+     *
+     * @param clip the write these dispatches belong to, or null for a caller that has no record
+     *             to write on. {@link ClipWrite#notesDispatched} is set the instant
+     *             {@code clip/setNotes} returns, and {@link ClipWrite#finalName} and
+     *             {@link ClipWrite#landingObservationSeq} are taken IMMEDIATELY BEFORE the rename
+     *             goes out -- not afterwards, and not re-derived, because a proof whose witness
+     *             is re-derived is a proof about something other than what happened.
+     */
+    private void writeNotesToCursor(double stepSize, JsonArray notes, String name, ClipWrite clip)
+            throws Exception {
         JsonObject stepSizeParams = new JsonObject();
         stepSizeParams.addProperty("size", stepSize);
         dispatcher.handleInternal("clip/setStepSize", stepSizeParams);
@@ -1038,8 +1158,15 @@ public class MacroHandler {
         JsonObject noteParams = new JsonObject();
         noteParams.add("notes", notes);
         dispatcher.handleInternal("clip/setNotes", noteParams);
+        if (clip != null) {
+            clip.notesDispatched = true;
+        }
 
         if (name != null) {
+            if (clip != null) {
+                clip.finalName = name;
+                clip.landingObservationSeq = stateCache.currentObservationTick();
+            }
             renameThroughCursor(name);
         }
 
@@ -1347,6 +1474,42 @@ public class MacroHandler {
         int bankSlot = -1;
 
         /**
+         * The PROJECT-ABSOLUTE track position {@link #trackIndex} resolves to, or {@code -1} when
+         * it could not be proven (plan 31-16, 31-REVIEW.md CR-01).
+         *
+         * <p>{@link #trackIndex} is a PUBLIC index and every cursor observation on this path is an
+         * absolute position, so the two are not comparable until this conversion has run. Computed
+         * ONCE, at the top of phase 2, and carried, so that all three compare sites and the refusal
+         * payload read the same computed number rather than each re-deriving it. {@code -1} is
+         * unproven, never track zero: the three ways it arises are named on
+         * {@code StateCache#absoluteTrackPositionForPublicIndex}, and it refuses the write with
+         * {@link MacroHandler#REFUSAL_UNRESOLVED_COORDINATE} rather than entering a compare.
+         */
+        int requestedTrackPosition = -1;
+
+        /**
+         * The PROJECT-ABSOLUTE scene index {@link #sceneIndex} addresses, or {@code -1} before the
+         * conversion has run (plan 31-16, 31-REVIEW.md CR-01).
+         *
+         * <p>{@link #sceneIndex} is a BANK-WINDOW slot subscript and the cursor's observed scene is
+         * absolute, so this is the scene bank's own observed scroll offset added to it. Unlike the
+         * track axis this has no unproven case -- the scroll observer fires at initialization and
+         * its value is an offset rather than a nullable reading -- so once phase 2 has run it is
+         * always a real index.
+         */
+        int requestedSceneAbsolute = -1;
+
+        /**
+         * The offset that reconciles {@link #sceneIndex} with {@link #requestedSceneAbsolute}: the
+         * scene bank's observed scroll position at the instant of the compare, or {@code -1} before
+         * the conversion has run.
+         *
+         * <p>Carried rather than re-read at payload time because a refusal reporting an offset the
+         * compare did not actually use would be a reconciliation that does not reconcile.
+         */
+        int sceneBankOffset = -1;
+
+        /**
          * The unique name written through the cursor to prove, before any note is dispatched, that
          * the cursor is holding the clip in the slot this write named. Null until phase 2 stamps.
          */
@@ -1393,6 +1556,69 @@ public class MacroHandler {
          * Saying which coordinate space it is in costs a sentence; translating it could be wrong.
          */
         String stampLeftAt;
+
+        /**
+         * Why the stamp's own rename could NOT be put back, or null when no reason applies.
+         *
+         * <p>The third fact beside {@link #stampRestored} and {@link #stampLeftAt}, and it exists
+         * because those two cannot tell a reader WHICH way the put-back failed (31-REVIEW.md
+         * CR-02 and CR-03). Two reasons reach it: the cursor had moved again by the time the
+         * put-back ran, so renaming through it would have clobbered a clip this write never
+         * touched; and no slot had published the token even after the extra look, so it could not
+         * be located to put back. Null where the put-back succeeded, and null where it was never
+         * attempted -- an absence rather than a sentence saying nothing happened.
+         */
+        String stampNotRestoredReason;
+
+        /**
+         * The name the CLOSING RENAME actually dispatched, or null before the notes went out.
+         *
+         * <p>RECORDED WHERE IT IS DISPATCHED, never re-derived afterwards. The landing proof in
+         * {@link MacroHandler#proveWriteLanded} asserts on this value, and a proof that
+         * re-derived its own witness through {@link MacroHandler#finalNameFor} would be proving
+         * something other than what happened: the helper reads the named slot's prior name out of
+         * {@link #priorNames}, and by proof time that array is a snapshot of a world several
+         * dispatches old.
+         */
+        String finalName;
+
+        /**
+         * {@code StateCache#currentObservationTick()} as it stood IMMEDIATELY BEFORE the closing
+         * rename went out, or {@code 0} before the notes were dispatched.
+         *
+         * <p>The landing proof accepts the named slot's echo only on an observation STRICTLY
+         * NEWER than this, for the reason {@link #stampObservationSeq} gives about the stamp: a
+         * reading that is merely PRESENT proves nothing, because the slot's name has been
+         * published since startup, and where the caller supplied no name the witness value is a
+         * string that slot itself once published. See {@link MacroHandler#proveWriteLanded}.
+         */
+        long landingObservationSeq;
+
+        /**
+         * Did the notes actually go out on the wire for this clip?
+         *
+         * <p>Published to the caller as {@code notesDispatched}. A fact about this engine's own
+         * call, in the same spirit as {@link #createDispatched}, and it exists because the
+         * refusal's standing sentence -- that nothing was written -- is FALSE on the landing-echo
+         * path. Nothing downstream may render that sentence over a refusal carrying this true.
+         */
+        boolean notesDispatched;
+
+        /**
+         * Where the notes APPEAR to be when the landing proof failed, or null when the engine
+         * cannot say.
+         *
+         * <p>Spelled {@code t<n>s<n>}, with its first number a PHYSICAL BANK SLOT rather than a
+         * public track index -- the same coordinate-space caveat {@link #stampLeftAt} carries,
+         * and for the same reason: the arrays the name was located in are keyed that way.
+         *
+         * <p>Published ONLY when exactly one slot carries the recorded final name AND that slot
+         * has been observed since the rename. Two slots carrying it is not an identity -- the
+         * caller may have reused a name -- and zero slots carrying it means the engine genuinely
+         * cannot say. Both publish an absence, because a guess dressed as a coordinate is the
+         * failure this phase exists to stop.
+         */
+        String notesLandedAt;
 
         /**
          * Was {@code clip/create} DISPATCHED for this clip without throwing?
@@ -1733,6 +1959,30 @@ public class MacroHandler {
     }
 
     /**
+     * Put the caller's (public track index, bank-window slot subscript) pair into the PROJECT-
+     * ABSOLUTE space the cursor is observed in, and carry both halves on the write.
+     *
+     * <p>ONE CONVERSION, ONE DIRECTION, THREE READERS (plan 31-16, D-31-24). It runs forward --
+     * caller to absolute -- because both forward resolvers already exist and are already this
+     * project's single source for their axis: the scene bank's own observed scroll offset, and the
+     * canonical bank slot WR-02 established. The reverse direction would need an inverse of the
+     * canonical resolution and a window-range test on the scene axis, both of which can fail where
+     * the forward direction cannot. The result is stored rather than recomputed so the pre-write
+     * compare, the expression hop's re-read and the refusal payload all speak about the same two
+     * numbers.
+     *
+     * <p>The track half is ASSERTED rather than assumed: {@code -1} back from the state cache means
+     * the coordinate could not be placed at all, and the caller of this method refuses on it rather
+     * than comparing numbers that are not comparable.
+     */
+    private void resolveRequestedAbsolutePair(ClipWrite clip) {
+        clip.sceneBankOffset = stateCache.getSceneBankOffset();
+        clip.requestedSceneAbsolute = clip.sceneBankOffset + clip.sceneIndex;
+        clip.requestedTrackPosition =
+            stateCache.absoluteTrackPositionForPublicIndex(clip.trackIndex);
+    }
+
+    /**
      * Phase 2: compare where the cursor clip actually is against the slot this clip was named for,
      * and write only if they agree.
      *
@@ -1741,10 +1991,35 @@ public class MacroHandler {
      */
     private void verifyThenWrite(WriteJob job, long elapsedMs) {
         ClipWrite clip = job.clips.get(job.index);
+
+        // BOTH SIDES IN ONE SPACE, converted once, before anything is compared (plan 31-16,
+        // 31-REVIEW.md CR-01). `getTrack().position()` and `clipLauncherSlot().sceneIndex()` are
+        // PROJECT-ABSOLUTE -- "the position of the track within the list of Bitwig Studio tracks"
+        // and "the position of the scene within the list of Bitwig Studio scenes"
+        // (engine/secondo/docs/bitwig-api-reference.txt:3147 and :849). The caller's pair is a
+        // PUBLIC track index and a BANK-WINDOW slot subscript. Comparing them raw is correct ONLY
+        // while both banks sit at the origin -- and this handler scrolls the scene bank itself, in
+        // handleBuildSection's auto-create path, so the state is reachable in ordinary use. Until
+        // this conversion existed, every launcher write on a scrolled session re-polled to the
+        // ceiling, refused, and the undo removed the clip phase 1 had just created.
+        resolveRequestedAbsolutePair(clip);
+
         int observedTrack = stateCache.getClipCursorTrackPosition();
         int observedScene = stateCache.getClipCursorSceneIndex();
 
-        if (observedTrack != clip.trackIndex || observedScene != clip.sceneIndex) {
+        // An UNPROVEN conversion is unproven, never track zero and never a lucky match. There is
+        // nothing to re-poll for -- an index the canonical resolver refuses, or a bank slot whose
+        // position observer has never fired, will read the same one flush later -- so this refuses
+        // immediately, and says which coordinate could not be placed rather than claiming the
+        // cursor was somewhere else.
+        if (clip.requestedTrackPosition < 0) {
+            refuseJob(job, clip, observedTrack, observedScene, elapsedMs,
+                CURSOR_VERIFY_CEILING_MS, REFUSAL_UNRESOLVED_COORDINATE);
+            return;
+        }
+
+        if (observedTrack != clip.requestedTrackPosition
+            || observedScene != clip.requestedSceneAbsolute) {
             if (elapsedMs + FLUSH_DELAY_MS <= CURSOR_VERIFY_CEILING_MS) {
                 // Possibly just a stale observer; give the flush cycle another go.
                 scheduler.schedule(() -> verifyThenWrite(job, elapsedMs + FLUSH_DELAY_MS), FLUSH_DELAY_MS);
@@ -1838,10 +2113,51 @@ public class MacroHandler {
         // The proof has failed, so the stamp is on a clip that is not the caller's. Put the name
         // back BEFORE the refusal completes, so the answer can say whether the put-back was
         // proven rather than leaving the owner to find out.
+        //
+        // The position reported below is the two cursor observers, and it stays as it is: both are
+        // already PROJECT-ABSOLUTE, so nothing here needs converting. What changed at plan 31-16
+        // is that the payload refuseJob builds now carries the caller's pair converted into that
+        // same space beside it, so the two numbers a reader compares are comparable.
         final long waitedMs = elapsedMs;
         restoreStampedName(clip, () -> refuseJob(job, clip,
             stateCache.getClipCursorTrackPosition(), stateCache.getClipCursorSceneIndex(),
             waitedMs, STAMP_ECHO_CEILING_MS, REFUSAL_STAMP_ECHO));
+    }
+
+    /**
+     * The ONE slot carrying {@code wanted} in a name snapshot, as {@code {bankSlot, sceneIndex}},
+     * or null when no slot carries it OR when more than one does.
+     *
+     * <p>ONE SCAN, TWO READERS, and an UNPROVEN answer for both of the two ways a scan can fail
+     * to identify anything. The stamp's token is unique by construction (D-31-04) so its scan can
+     * only ever find zero or one; the landing proof's witness is a name the CALLER chose, and a
+     * caller is free to write one name to two clips -- which is precisely why a multiple match
+     * has to be an absence rather than a first match. Returning the first would let a collision
+     * read as a coordinate, which is the class of claim this whole phase exists to stop.
+     *
+     * <p>The coordinates are in the snapshot's own space: a PHYSICAL BANK SLOT and a bank-window
+     * scene subscript. Saying so costs a sentence; translating it could be wrong.
+     */
+    private static int[] locateName(String[][] names, String wanted) {
+        if (names == null || wanted == null) {
+            return null;
+        }
+        int[] found = null;
+        for (int bank = 0; bank < names.length; bank++) {
+            String[] row = names[bank];
+            if (row == null) {
+                continue;
+            }
+            for (int scene = 0; scene < row.length; scene++) {
+                if (wanted.equals(row[scene])) {
+                    if (found != null) {
+                        return null;
+                    }
+                    found = new int[] { bank, scene };
+                }
+            }
+        }
+        return found;
     }
 
     /**
@@ -1855,42 +2171,95 @@ public class MacroHandler {
      * is truthfulness must not silently rename the owner's music.
      *
      * <p>HOW THE SLOT IS FOUND. The token is unique per write (D-31-04), so at most one slot can
-     * be carrying it, and that slot names exactly where the cursor was. The cursor is STILL on
-     * that clip -- that is why the echo failed -- so the prior name goes back through the same
-     * cursor-scoped rename route, with no new coordinate and no new RPC. The re-read one flush
+     * be carrying it, and that slot names exactly where the cursor WAS. The prior name goes back
+     * through the same cursor-scoped rename route, with no new coordinate and no new RPC -- and
+     * because that route follows the CURSOR rather than the coordinate the token was found at,
+     * the two have to be proven to agree first. See the next paragraph. The re-read one flush
      * later is what makes the reported fact an observation rather than a claim: an accepted
      * dispatch is not proof here either.
      *
-     * <p>WHAT IT REPORTS, as two facts rather than one. Both absent means the token was not found
-     * at any slot: the stamp may not have landed anywhere observable, which is itself the honest
-     * answer and one the pair has to be able to express. {@code stampLeftAt} present with
+     * <p>THE CURSOR IS NOT NECESSARILY STILL ON THE STAMPED CLIP, and the sentence that used to
+     * say it was is corrected here rather than deleted (31-REVIEW.md CR-02). It is true of ONE
+     * of the cases this method is reached in -- the stamp-echo exhaustion, where the cursor sat
+     * on somebody else's clip for the whole window -- and FALSE of another: the cursor can move
+     * AGAIN between the stamp and the ceiling expiring, and on the landing-echo path it is
+     * elsewhere BY CONSTRUCTION. In that state a cursor-scoped rename would overwrite the name of
+     * a clip this write never touched, with a name belonging to a different clip. So before the
+     * rename goes out, the found slot's coordinates are converted into the cursor observers' own
+     * PROJECT-ABSOLUTE space -- the scene bank's offset on one axis, the per-bank-slot position
+     * observer on the other -- and compared. On a disagreement nothing is dispatched and
+     * {@link ClipWrite#stampNotRestoredReason} says so.
+     *
+     * <p>A TOKEN THAT HAS NOT BEEN PUBLISHED ANYWHERE YET GETS ONE MORE FLUSH (31-REVIEW.md
+     * CR-03). That is the LIKELIEST reason the echo in front of this failed at all: the measured
+     * echo is 125 ms of a 200 ms ceiling, so a slow flush, a loaded session or a chain in front
+     * of the write all put the publication past it. Concluding "it landed nowhere" from the first
+     * snapshot means never attempting the one restore that was certain to be safe, and leaving
+     * the owner's own clip called {@code SECONDO-STAMP-<n>-c<i>} permanently. When it still has
+     * not been published after that extra look, the answer NAMES THE TOKEN, so the owner is told
+     * a clip may be carrying it rather than told nothing at all.
+     *
+     * <p>WHAT IT REPORTS, as three facts rather than two. {@code stampLeftAt} present with
      * {@code stampRestored} absent means the restore was attempted there and could not be proven.
      * {@code stampRestored} true means a read saw the prior name back.
+     * {@code stampNotRestoredReason} is the one that says WHICH way a put-back did not happen,
+     * which the other two between them could not.
      */
     private void restoreStampedName(ClipWrite clip, Runnable then) {
+        restoreStampedName(clip, then, 0);
+    }
+
+    /**
+     * @param attempt how many times this has already looked for the token and not found it. Zero
+     *                from the one-argument overload, so no call site changes shape; one from the
+     *                extra look CR-03 gives the publication, after which a token that is still
+     *                nowhere is reported rather than re-scheduled forever.
+     * @see #restoreStampedName(ClipWrite, Runnable)
+     */
+    private void restoreStampedName(ClipWrite clip, Runnable then, int attempt) {
         String[][] now = stateCache.snapshotClipNames();
-        int foundBankSlot = -1;
-        int foundScene = -1;
-        for (int bank = 0; bank < now.length && foundBankSlot < 0; bank++) {
-            for (int scene = 0; scene < now[bank].length; scene++) {
-                if (clip.stampToken != null && clip.stampToken.equals(now[bank][scene])) {
-                    foundBankSlot = bank;
-                    foundScene = scene;
-                    break;
-                }
-            }
-        }
+        int[] located = locateName(now, clip.stampToken);
+        int foundBankSlot = located != null ? located[0] : -1;
+        int foundScene = located != null ? located[1] : -1;
 
         if (foundBankSlot < 0) {
-            // Nothing carries the token. Both keys stay absent, which is the pair's way of saying
-            // the stamp did not land anywhere this engine can see.
+            if (attempt == 0) {
+                // ONE MORE FLUSH before this is allowed to mean "it landed nowhere". See the
+                // CR-03 paragraph above: an unpublished token is on a real clip, and it is the
+                // sub-case where the cursor is most likely still on it.
+                scheduler.schedule(() -> restoreStampedName(clip, then, attempt + 1),
+                    FLUSH_DELAY_MS);
+                return;
+            }
+            clip.stampNotRestoredReason =
+                "the stamp was dispatched and no slot has published it, so it could not be"
+                    + " located to put back -- a clip may be carrying " + clip.stampToken;
             then.run();
             return;
         }
 
         clip.stampLeftAt = "t" + foundBankSlot + "s" + foundScene;
-        String prior = clip.priorNames != null ? clip.priorNames[foundBankSlot][foundScene] : null;
-        final String wanted = prior != null ? prior : "";
+
+        // CR-02: PROVE THE CURSOR IS STILL THERE BEFORE RENAMING THROUGH IT. The found
+        // coordinate is a PHYSICAL BANK SLOT and a BANK-WINDOW scene subscript, because that is
+        // how the snapshot is keyed; the two cursor observers are PROJECT-ABSOLUTE on both axes.
+        // So the found pair is converted forward into the observers' space -- the same one
+        // direction, through the same two resolvers, that resolveRequestedAbsolutePair already
+        // uses for the caller's pair (plan 31-16, D-31-24) -- and an unproven track position is
+        // treated as unproven rather than as track zero.
+        int foundTrackPosition = stateCache.trackPositionAtBankSlot(foundBankSlot);
+        int foundSceneAbsolute = stateCache.getSceneBankOffset() + foundScene;
+        if (foundTrackPosition < 0
+            || foundTrackPosition != stateCache.getClipCursorTrackPosition()
+            || foundSceneAbsolute != stateCache.getClipCursorSceneIndex()) {
+            clip.stampNotRestoredReason =
+                "the cursor had moved again, so the name could not be put back through it without"
+                    + " renaming a clip this write never touched";
+            then.run();
+            return;
+        }
+
+        final String wanted = priorNameAt(clip.priorNames, foundBankSlot, foundScene);
         try {
             renameThroughCursor(wanted);
         } catch (Exception e) {
@@ -1907,6 +2276,33 @@ public class MacroHandler {
             }
             then.run();
         }, FLUSH_DELAY_MS);
+    }
+
+    /**
+     * What {@code bankSlot}/{@code sceneIndex} was called in a pre-stamp names snapshot, or the
+     * empty string when that cannot be answered.
+     *
+     * <p>BOUNDS-GUARDED IN BOTH DIMENSIONS, the way {@link ClipWrite#priorNameAtNamedSlot()}
+     * already guards the same array (31-REVIEW.md CR-02). The raw two-dimensional read it
+     * replaces was safe only because both snapshots come from
+     * {@code StateCache#snapshotClipNames()} at one fixed size -- an accident of today's
+     * implementation rather than a property anything asserts. An {@code ArrayIndexOutOfBounds}
+     * here escapes a SCHEDULED TASK, which means it reaches no terminal path at all: the write
+     * queue stays latched for the rest of the session and every later write answers
+     * {@code queue-busy} at the front door (the WR-05 failure shape, one handler over).
+     *
+     * <p>The empty string rather than null, because it is what the rename is handed and a rename
+     * needs a string. It is also what the unguarded version produced for an unobserved name.
+     */
+    static String priorNameAt(String[][] priorNames, int bankSlot, int sceneIndex) {
+        if (priorNames == null
+            || bankSlot < 0 || bankSlot >= priorNames.length
+            || priorNames[bankSlot] == null
+            || sceneIndex < 0 || sceneIndex >= priorNames[bankSlot].length) {
+            return "";
+        }
+        String prior = priorNames[bankSlot][sceneIndex];
+        return prior != null ? prior : "";
     }
 
     /** The one cursor-scoped rename route, shared by the stamp, the final name and the restore. */
@@ -1942,7 +2338,7 @@ public class MacroHandler {
     private void writeProvenClip(WriteJob job, ClipWrite clip) {
         ExpressionWork work;
         try {
-            writeNotesToCursor(clip.stepSize, clip.notes, finalNameFor(clip));
+            writeNotesToCursor(clip.stepSize, clip.notes, finalNameFor(clip), clip);
             // INSIDE the guard, since plan 31-06 (29-REVIEW.md, WR-05). This is the WEAKER half of
             // WR-05's fix and it is kept as a BACKSTOP rather than as the fix: handleWriteClip now
             // refuses a malformed payload before anything is queued, but macro/buildSection's
@@ -1965,6 +2361,142 @@ public class MacroHandler {
             return;
         }
 
+        // Phase 2c: THE LANDING PROOF, one flush later, and NOTHING ELSE IS DISPATCHED and
+        // nothing is recorded as landed until it holds (plan 31-17, D-31-25). It goes here --
+        // immediately after the dispatch returns, ahead of the expression hop and ahead of
+        // `advance` -- so a failure cannot be followed by an expression pass aimed at a clip the
+        // engine cannot place, and so the answer cannot claim a slot the notes did not reach.
+        //
+        // The collection above is deliberately still done first: it dispatches nothing, it is the
+        // one step that can throw for reasons having nothing to do with the cursor, and running
+        // it inside the guard is what makes the WR-05 backstop reachable at all.
+        final ExpressionWork collected = work;
+        scheduler.schedule(
+            () -> proveWriteLanded(job, clip, collected, FLUSH_DELAY_MS), FLUSH_DELAY_MS);
+    }
+
+    /**
+     * THE LANDING PROOF. The same three facts as {@link #proveStampEcho}, conjoined the same way,
+     * taken on the same independent witness -- but AFTER the dispatch rather than in front of it:
+     *
+     * <ol>
+     *   <li>the caller's track index RESOLVED to a physical bank slot -- {@code -1} is unproven,
+     *       never slot zero;</li>
+     *   <li>that slot's observation sequence is STRICTLY GREATER than the tick recorded
+     *       immediately before the closing rename went out, so the reading is newer than the act
+     *       it is meant to witness; and</li>
+     *   <li>the name it published is {@link ClipWrite#finalName} -- the value that rename was
+     *       actually handed -- exactly.</li>
+     * </ol>
+     *
+     * <p>WHY A SECOND PROOF RATHER THAN A BETTER FIRST ONE. {@link #proveStampEcho} establishes
+     * where the cursor WAS at echo time. The echo is itself an observer reading on the flush
+     * cycle, so the notes and the closing rename then go out through the cursor wherever it now
+     * is, and the live 150 ms row fell into exactly that gap. There is no synchronous identity
+     * read at API v25, so the gap cannot be closed by reading harder -- but a second echo, taken
+     * after the dispatch on the same witness, turns an unprovable success into a provable one or
+     * into a refusal that says where the notes went.
+     *
+     * <p>WHY THE NAME FACT IS NOT VACUOUS IN THE ONE SHAPE WHERE IT COULD BE. When the caller
+     * supplied no name and the named slot was occupied, {@link #finalNameFor} reuses that slot's
+     * OWN prior name, so the witness value is a string the named slot itself once published --
+     * and a proof whose witness was already true before the act is no proof. It survives that
+     * case only because THE STAMP IS INTERPOSED: between the prior name and the closing rename
+     * the named slot was renamed to the unique token, so for the whole window this proof covers
+     * the named slot is publishing the token and not the reused name, and a rename that went
+     * elsewhere leaves the name fact failing. THAT INTERPOSITION IS AN INVARIANT
+     * {@link #proveStampEcho} ESTABLISHES AND THIS METHOD DOES NOT RE-CHECK. So the
+     * observation-sequence fact is tested STANDING ALONE as well, in a harness state reached
+     * directly rather than through the stamp path: neither of the two facts is permitted to be
+     * the one the tests assume while proving the other.
+     *
+     * <p>On a miss it re-polls one flush later while {@link #LANDING_ECHO_CEILING_MS} remains,
+     * and on exhaustion it refuses through the existing path with the existing code. It NEVER
+     * re-points the cursor and writes again (D-31-07), and it never deletes or modifies notes on
+     * a clip this job cannot prove it created -- where the notes reached a third clip it SAYS
+     * where, in {@link ClipWrite#notesLandedAt}, and stops.
+     *
+     * <p>Paid PER CLIP and never amortised across a chain (D-31-11), for the reason
+     * {@link #proveStampEcho} gives: each clip has its own slot, its own cursor move and its own
+     * closing rename.
+     *
+     * @param elapsedMs how long has been spent waiting for the landing echo, against
+     *                  {@link #LANDING_ECHO_CEILING_MS}
+     */
+    private void proveWriteLanded(WriteJob job, ClipWrite clip, ExpressionWork work,
+                                  long elapsedMs) {
+        boolean resolved = clip.bankSlot >= 0;
+        long observedSeq = resolved
+            ? stateCache.getClipObservationSeqAtBankSlot(clip.bankSlot, clip.sceneIndex)
+            : 0;
+        String observedName = resolved
+            ? stateCache.getClipNameAtBankSlot(clip.bankSlot, clip.sceneIndex)
+            : null;
+
+        if (resolved
+            && observedSeq > clip.landingObservationSeq
+            && clip.finalName != null
+            && clip.finalName.equals(observedName)) {
+            continueAfterLanding(job, clip, work);
+            return;
+        }
+
+        if (elapsedMs + FLUSH_DELAY_MS <= LANDING_ECHO_CEILING_MS) {
+            scheduler.schedule(
+                () -> proveWriteLanded(job, clip, work, elapsedMs + FLUSH_DELAY_MS),
+                FLUSH_DELAY_MS);
+            return;
+        }
+
+        // The proof has failed. Take a FRESH snapshot and look for the name the rename actually
+        // wrote, so the answer can say where the notes appear to be rather than only that they
+        // are not where they were addressed.
+        //
+        // Published for a SINGLE FRESH MATCH and for nothing else. A name at more than one slot
+        // is not an identity -- the caller could have reused it -- and a name at no slot means
+        // the engine genuinely cannot say. Both publish an absence.
+        String[][] now = stateCache.snapshotClipNames();
+        int[] found = clip.finalName != null ? locateName(now, clip.finalName) : null;
+        if (found != null
+            && stateCache.getClipObservationSeqAtBankSlot(found[0], found[1])
+                > clip.landingObservationSeq) {
+            clip.notesLandedAt = "t" + found[0] + "s" + found[1];
+        }
+
+        final long waitedMs = elapsedMs;
+        Runnable refuse = () -> refuseJob(job, clip,
+            stateCache.getClipCursorTrackPosition(), stateCache.getClipCursorSceneIndex(),
+            waitedMs, LANDING_ECHO_CEILING_MS, REFUSAL_LANDING_ECHO);
+
+        // THE PUT-BACK AND THE UNDO ARE MUTUALLY EXCLUSIVE BY CONSTRUCTION, NOT BY LUCK (plan
+        // 31-17, gap 2). On THIS path the stamp is at the NAMED slot by construction: the landing
+        // proof is only reached because that slot echoed the token. So the question of whether
+        // the token is about to be deleted anyway is exactly the question of whether the undo
+        // will act, and both read the SAME recorded facts -- settleSlotEvidence is idempotent, it
+        // is called here and again inside refuseJob, and the second call reads what the first
+        // decided rather than re-deriving it against a cache that has moved on.
+        settleSlotEvidence(job, clip);
+        if (Boolean.TRUE.equals(clip.slotWasEmpty)) {
+            // The undo is about to remove the clip the stamp is on, and the stamp goes with it.
+            // Putting a name back on a clip that is about to cease to exist is one more
+            // cursor-scoped rename at the worst possible moment, with no beneficiary.
+            refuse.run();
+            return;
+        }
+        // The overwrite case: the clip at the named slot is the OWNER'S, the undo will not act,
+        // and without this the engine's own internal token would be permanent. This is the branch
+        // the accepted live run never reached, which is why it left SECONDO-STAMP-2-c0 on a clip
+        // in the owner's grid.
+        restoreStampedName(clip, refuse);
+    }
+
+    /**
+     * The landing proof held: record the clip as landed, exactly as this path always has.
+     *
+     * <p>Split out of {@link #writeProvenClip} rather than inlined so that the one place a clip
+     * becomes "landed" is reached from the one place that proves it did.
+     */
+    private void continueAfterLanding(WriteJob job, ClipWrite clip, ExpressionWork work) {
         if (work == null) {
             advance(job, clip, "none");
             return;
@@ -1976,7 +2508,13 @@ public class MacroHandler {
         scheduler.schedule(() -> {
             int exprTrack = stateCache.getClipCursorTrackPosition();
             int exprScene = stateCache.getClipCursorSceneIndex();
-            if (exprTrack != clip.trackIndex || exprScene != clip.sceneIndex) {
+            // ONE SPACE HERE TOO. These are the same two PROJECT-ABSOLUTE cursor observers the
+            // pre-write compare reads, so they are put against the same converted pair that
+            // compare used -- computed once in resolveRequestedAbsolutePair and carried on the
+            // write. One corrected compare site and two uncorrected ones would be the same defect
+            // with a smaller blast radius, not a fix (plan 31-16, 31-REVIEW.md CR-01).
+            if (exprTrack != clip.requestedTrackPosition
+                || exprScene != clip.requestedSceneAbsolute) {
                 refuseExpressions(job, clip, exprTrack, exprScene);
                 return;
             }
@@ -2126,6 +2664,23 @@ public class MacroHandler {
         boolean clipRemoved = Boolean.TRUE.equals(clip.slotWasEmpty) && removeCreatedClip(clip);
         String leftoverReason = leftoverReason(clip, clipRemoved);
 
+        // ONE SENTENCE PER TRUTH. The standing wording is kept BYTE-FOR-BYTE on the three
+        // triggers it was true of (D-29-13: owners are told to search these lines, so nothing
+        // that was already correct is reworded). It is NOT reused on `landing-echo`, where the
+        // notes demonstrably did go out: printing "no notes were written" over a dispatched write
+        // would be the same false report this phase exists to stop, one layer down. ASCII only,
+        // for the reason WINDOWS.md row 166 gives about this build's source encoding.
+        String refusedSentence = clip.notesDispatched
+            ? " -- REFUSED: the notes WERE dispatched and the slot this write named never"
+                + " reported carrying the name they were written with, so the write is refused"
+                + " rather than reported as landed."
+                + (clip.notesLandedAt != null
+                    ? " They appear to be at " + clip.notesLandedAt
+                        + " (first number a physical bank slot)."
+                    : " The engine cannot say where they are.")
+                + " "
+            : " — REFUSED: the cursor clip was not on the slot this write named, so no notes were"
+                + " written. ";
         errorLog.accept(MARKER_CURSOR_MISMATCH + " " + timestamp + " " + job.method
             + " code=" + JsonRpcError.CURSOR_MISMATCH
             + " requested=" + clip.label()
@@ -2134,13 +2689,17 @@ public class MacroHandler {
             + " ceilingMs=" + ceilingMs
             + " waitedMs=" + elapsedMs
             + " reason=" + refusalReason
-            + " — REFUSED: the cursor clip was not on the slot this write named, so no notes were"
-            + " written. " + slotOutcome(clip, clipRemoved, leftoverReason) + chainSummary(job));
+            + refusedSentence + slotOutcome(clip, clipRemoved, leftoverReason) + chainSummary(job));
 
-        // Terminal path 2 of 4, and it now has TWO triggers rather than one: the position compare
-        // never agreed, or it agreed and the identity proof that follows it did not. Both are the
-        // same clean refusal -- same code, same undo, same response shape -- so this stays one
-        // terminal path and `refusalReason` carries the difference (D-31-07). The refusal travels
+        // Terminal path 2 of 4, and it now has FOUR triggers rather than one: the position
+        // compare never agreed (`cursor-position`); it agreed and the identity proof in front of
+        // the write did not (`stamp-echo`); the caller's coordinate could not be put into the
+        // space the cursor is observed in at all (`unresolved-coordinate`); or the write went out
+        // and the slot it was addressed to never published the name it wrote (`landing-echo`).
+        // All four are the same clean refusal -- same code, same undo, same response shape -- so
+        // this stays one terminal path and `refusalReason` carries the difference (D-31-07,
+        // D-31-25). THE PATHS ARE STILL FOUR: this plan added a TRIGGER, not an OUTCOME, and the
+        // file's convention is that only a new outcome renumbers them. The refusal travels
         // IN THE RESPONSE, not only in the marked
         // console line above and the snapshot counter. The four position keys are the ones
         // src/secondo/tools/write_clip.py:1961-1964 already reads; ceilingMs and finding say how
@@ -2148,8 +2707,23 @@ public class MacroHandler {
         // say what happened to the slot itself, as separate readable facts rather than as prose a
         // program would have to parse (D-29-12).
         JsonObject data = new JsonObject();
+        // FIVE COORDINATE KEYS IN TWO SPACES, and which is which is stated rather than left to be
+        // inferred (plan 31-16, 31-REVIEW.md CR-01 consequence 3). `requestedTrack` and
+        // `requestedScene` are THE CALLER'S OWN coordinates -- a public track index and a
+        // BANK-WINDOW slot subscript -- exactly as they were sent, because that is what
+        // src/secondo/tools/write_clip.py reads and what its tests pin. `cursorTrack`,
+        // `cursorScene`, `requestedTrackPosition` and `requestedSceneAbsolute` are THE ENGINE'S
+        // COMPARISON SPACE, project-absolute on both axes, and they are the pair the compare
+        // actually put against each other. `sceneBankOffset` is the number that reconciles the two
+        // scene keys: requestedScene + sceneBankOffset == requestedSceneAbsolute. Until these
+        // three keys existed the payload published a bank-relative scene beside an absolute one
+        // with nothing saying so, and the tool layer rendered both into one sentence -- a reader
+        // comparing the wrong pair is the defect this addition closes.
         data.addProperty("requestedTrack", clip.trackIndex);
         data.addProperty("requestedScene", clip.sceneIndex);
+        addPosition(data, "requestedTrackPosition", clip.requestedTrackPosition);
+        addPosition(data, "requestedSceneAbsolute", clip.requestedSceneAbsolute);
+        addPosition(data, "sceneBankOffset", clip.sceneBankOffset);
         addPosition(data, "cursorTrack", cursorTrack);
         addPosition(data, "cursorScene", cursorScene);
         data.addProperty("ceilingMs", ceilingMs);
@@ -2176,8 +2750,36 @@ public class MacroHandler {
         } else {
             data.add("stampLeftAt", JsonNull.INSTANCE);
         }
+        // WHY the put-back did not happen, as its own key beside the two above and with the same
+        // discipline: always present, an absence published rather than omitted (31-REVIEW.md
+        // CR-02 and CR-03). `stampRestored` null and `stampLeftAt` null used to be the whole
+        // vocabulary, and between them they could not say whether the cursor had moved again or
+        // whether the token had simply never been published.
+        if (clip.stampNotRestoredReason != null) {
+            data.addProperty("stampNotRestoredReason", clip.stampNotRestoredReason);
+        } else {
+            data.add("stampNotRestoredReason", JsonNull.INSTANCE);
+        }
+        // THE TWO FACTS THAT MAKE THE STANDING SENTENCE CORRECTABLE (plan 31-17, D-31-25). Every
+        // refusal before `landing-echo` existed was reached with nothing on the wire, so "nothing
+        // was written" was true of all of them. On this one the notes DID go out, so the engine
+        // says so -- and where it can prove where they went, it says that too. Both are always
+        // present: false and null respectively on the three triggers that dispatch nothing.
+        data.addProperty("notesDispatched", clip.notesDispatched);
+        if (clip.notesLandedAt != null) {
+            data.addProperty("notesLandedAt", clip.notesLandedAt);
+        } else {
+            data.add("notesLandedAt", JsonNull.INSTANCE);
+        }
+        // The message branches on the same one fact the payload publishes, so a reader who never
+        // looks at `notesDispatched` still cannot be told something false. The three triggers
+        // that dispatch nothing keep their wording byte-for-byte.
         completePending(job, JsonRpcError.CURSOR_MISMATCH,
-            "the cursor clip was not on the slot this write named, so nothing was written",
+            clip.notesDispatched
+                ? "the notes were dispatched and the slot this write named never reported"
+                    + " carrying the name they were written with, so the write is refused rather"
+                    + " than reported as landed"
+                : "the cursor clip was not on the slot this write named, so nothing was written",
             data);
         finishJob(job);
     }

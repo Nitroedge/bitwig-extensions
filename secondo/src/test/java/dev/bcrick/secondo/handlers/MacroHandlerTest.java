@@ -48,6 +48,17 @@ class MacroHandlerTest {
         StateCacheTestHelper.installTrackBankManager(stateCache,
             new TrackBankManager(null, StateCacheTestHelper.trackCountOf(StateCache.class)));
 
+        // The same argument, one axis over (plan 31-16). Since the cursor compare converts the
+        // caller's PUBLIC index into a PROJECT-ABSOLUTE track position, a bank slot whose
+        // position() observer has never fired is unproven and refuses the write. Production fires
+        // one for every slot in the bank during initialization, so a harness that left them absent
+        // would be asserting against a coordinate space the engine is never in. The identity --
+        // slot i at position i -- is what every assertion in this class was written against.
+        int trackCount = StateCacheTestHelper.trackCountOf(StateCache.class);
+        for (int slot = 0; slot < trackCount; slot++) {
+            StateCacheTestHelper.setTrackPositionAtBankSlot(stateCache, slot, slot);
+        }
+
         // Register stub handlers that log calls
         dispatcher.register("track/createAudio", params -> {
             callLog.add("track/createAudio" + (params.has("position")

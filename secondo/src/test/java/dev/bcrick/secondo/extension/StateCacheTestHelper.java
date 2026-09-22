@@ -203,6 +203,80 @@ public class StateCacheTestHelper {
         }
     }
 
+    /**
+     * Sets the scene bank's scroll position -- the offset that turns a BANK-WINDOW slot subscript
+     * into a PROJECT-ABSOLUTE scene index, and back.
+     *
+     * <p>The coordinate space is named in that sentence rather than left to the reader because
+     * mixing two of them is the whole defect this helper exists to make expressible
+     * (31-REVIEW.md CR-01). {@code clipCursorSceneIndex} is bound to
+     * {@code cursorClip.clipLauncherSlot().sceneIndex()}, which the API reference defines as the
+     * position of the scene within the list of Bitwig Studio scenes -- PROJECT-ABSOLUTE -- while a
+     * caller's {@code sceneIndex} is a subscript into the sixteen-wide {@code ClipLauncherSlotBank}
+     * WINDOW. At a scroll of zero the two are the same number, which is why every live run to date
+     * has been at zero and the defect has never been observed.
+     *
+     * <p>In production this field is written by {@code sceneBank.scrollPosition()}'s observer
+     * ({@code StateCache.java:722}) and has NO public accessor -- adding one belongs to the fix,
+     * not to the harness. Seeding it here is what gives that fix something to read.
+     */
+    public static void setSceneBankOffset(StateCache cache, int scrollPosition) {
+        setField(cache, "sceneBankOffset", scrollPosition);
+    }
+
+    /**
+     * Sets the PROJECT-ABSOLUTE track position observed for ONE physical bank slot -- what
+     * {@code track.position()}'s observer writes per bank subscript ({@code StateCache.java:519}).
+     *
+     * <p>Two coordinate spaces meet in this one call and both are named, because they are different
+     * numbers the moment a group track is collapsed or the track bank is scrolled. The argument
+     * {@code bankSlot} is a PHYSICAL BANK SUBSCRIPT into the flat {@code trackBank}; the value
+     * {@code position} is the track's PROJECT-ABSOLUTE position in Bitwig's own track list. A
+     * caller's {@code trackIndex} is neither -- it is a PUBLIC INDEX, which is what
+     * {@link StateCache#resolveCanonicalBankSlot(int)} exists to convert into the first of these.
+     *
+     * <p>{@code trackPositions} is an {@code Integer[]}, so an unset slot reads {@code null} -- the
+     * honest "no observer has fired here" -- and this helper is how a test says one has.
+     */
+    public static void setTrackPositionAtBankSlot(StateCache cache, int bankSlot, int position) {
+        setArrayElement(cache, "trackPositions", bankSlot, position);
+    }
+
+    /**
+     * Says that NO position observer has ever fired for one physical bank slot, which
+     * {@code trackPositions} represents as an absent entry rather than as a number.
+     *
+     * <p>The sibling above cannot express this: it takes an {@code int}, and every {@code int} is
+     * a position some track could genuinely have. This is the third of the three unresolvable
+     * cases {@code StateCache#absoluteTrackPositionForPublicIndex} names -- the one where the
+     * public index RESOLVES to a real bank slot and the slot still has no absolute position to
+     * convert to -- and it is the only one of the three in which the emptiness read in front of it
+     * is itself proven, so it is the only one that can assert what the undo does. Added by plan
+     * 31-16 for that case.
+     */
+    public static void clearTrackPositionAtBankSlot(StateCache cache, int bankSlot) {
+        setArrayElement(cache, "trackPositions", bankSlot, null);
+    }
+
+    /**
+     * Reads a private static {@code STAMP_PREFIX} from the given class.
+     *
+     * <p>{@code MacroHandler} declares {@code private static final String STAMP_PREFIX}
+     * ({@code :198}), and every token an identity proof is taken with starts with it. The read goes
+     * through here rather than being inlined in a test as {@code "SECONDO-STAMP-"} for exactly the
+     * reason {@link #flushDelayOf(Class)} and {@link #trackCountOf(Class)} exist: a test that
+     * restates a constant is a test that can be left behind asserting the old value.
+     */
+    public static String stampPrefixOf(Class<?> owner) {
+        try {
+            Field field = owner.getDeclaredField("STAMP_PREFIX");
+            field.setAccessible(true);
+            return (String) field.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to read STAMP_PREFIX from: " + owner.getName(), e);
+        }
+    }
+
     static void setField(StateCache cache, String fieldName, Object value) {
         try {
             Field field = StateCache.class.getDeclaredField(fieldName);

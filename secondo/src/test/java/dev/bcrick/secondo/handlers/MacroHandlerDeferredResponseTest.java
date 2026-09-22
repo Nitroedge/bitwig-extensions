@@ -138,6 +138,17 @@ class MacroHandlerDeferredResponseTest {
         StateCacheTestHelper.installTrackBankManager(stateCache,
             new TrackBankManager(null, StateCacheTestHelper.trackCountOf(StateCache.class)));
 
+        // The same argument, one axis over (plan 31-16). Since the cursor compare converts the
+        // caller's PUBLIC index into a PROJECT-ABSOLUTE track position, a bank slot whose
+        // position() observer has never fired is unproven and refuses the write. Production fires
+        // one for every slot in the bank during initialization, so a harness that left them absent
+        // would be asserting against a coordinate space the engine is never in. The identity --
+        // slot i at position i -- is what every assertion in this class was written against.
+        int seededTrackCount = StateCacheTestHelper.trackCountOf(StateCache.class);
+        for (int slot = 0; slot < seededTrackCount; slot++) {
+            StateCacheTestHelper.setTrackPositionAtBankSlot(stateCache, slot, slot);
+        }
+
         // A DEFERRING scheduler: the task is parked, not run. The flush window becomes a place
         // the test can stand, which is what makes "the future is not done yet" assertable.
         //
@@ -500,12 +511,15 @@ class MacroHandlerDeferredResponseTest {
         CompletableFuture<String> future = enqueueWriteClip(0, 7, TWO_NOTES, 1);
         queue.drainAndExecute(dispatcher);
 
-        // The verify hop and the identity proof run and the write succeeds, well inside the
-        // deadline. Two rounds since plan 31-04, for the reason given in test 8.
+        // The verify hop, the identity proof and the LANDING proof run and the write succeeds,
+        // well inside the deadline. Two rounds since plan 31-04 and three since plan 31-17, for
+        // the reason given in test 8: each proof is a flush of its own. Re-timed, not relaxed.
+        runPendingOnce();
         runPendingOnce();
         runPendingOnce();
         assertTrue(future.isDone(),
-            "the write should have completed on its verify and its identity proof");
+            "the write should have completed on its verify, its identity proof and its landing"
+                + " proof");
         String answered = future.get(1, TimeUnit.SECONDS);
         assertFalse(JsonParser.parseString(answered).getAsJsonObject().has("error"));
 
