@@ -210,6 +210,23 @@ class HandlerRegistrationIntegrationTest {
         }
     }
 
+    /**
+     * Phase 28 plan 28-18's three filter item bank routes (D-28-32) reach api/list through the
+     * same BrowserHandler wiring init() uses. As for Phase 29, no method count is restated here:
+     * the surface move (342 -> 345) is measured from source at the build, not asserted.
+     */
+    @Test
+    void apiListContainsThePhase28Routes() {
+        String response = rpc("api/list", "{}");
+        JsonArray methods = JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonArray("result");
+        for (String name : new String[] {
+                "browser/getFilterItems", "browser/scrollFilterItems",
+                "browser/setFilterItemSelected"}) {
+            assertTrue(methods.contains(new JsonPrimitive(name)), "api/list lacks " + name);
+        }
+    }
+
     // --- Namespace presence ---
 
     @Test

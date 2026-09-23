@@ -2785,4 +2785,171 @@ public class StateCache {
         obj.addProperty("accentPhase", grooveAccentPhase);
         return obj;
     }
+
+    // --- Phase 28 (D-28-32): the per-column filter item bank ---
+    //
+    // APPENDED at the end of the class on purpose: every existing `StateCache.java:<line>`
+    // citation in mock/ and src/ still points where it pointed. A filter column's cursor
+    // (registerFilterObservers) shows ONE entry, and Bitwig re-scopes the tag column under it, so
+    // a column could only be enumerated by stepping the cursor. A v25
+    // BrowserFilterColumn.createItemBank(int) bank is a scrollable window of entries, each with a
+    // name, a hit count, an existence flag and a SETTABLE selection, so a column can be read whole
+    // at its wildcard and the named entry selected directly.
+    //
+    // Exactly three columns are banked - category, tag and creator, the recall's usable columns -
+    // and the five others get NO bank. Everything here is created in registerFilterItemBanks,
+    // which SecondoExtension.init calls once, on the line after registerFilterObservers: Bitwig
+    // accepts proxies, banks and observers only inside init(). Every cached value is null until
+    // its observer fires (D-26-12). The bank is kept OUT of getBrowserState(), so it is out of
+    // session/snapshot and out of the WebSocket change hash.
+
+    /** The window width of each banked filter column (D-28-32). Public: BrowserHandler bounds slots by it. */
+    public static final int FILTER_ITEM_BANK_SIZE = 64;
+
+    /** The banked columns, as indices into FILTER_COLUMN_NAMES: category 0, tag 1, creator 2. */
+    static final int[] FILTER_ITEM_BANK_COLUMNS = {0, 1, 2};
+
+    private final BrowserFilterItemBank[] filterItemBanks =
+        new BrowserFilterItemBank[FILTER_ITEM_BANK_COLUMNS.length];
+    private final Integer[] filterItemBankScrollPositions = new Integer[FILTER_ITEM_BANK_COLUMNS.length];
+    private final Integer[] filterItemBankItemCounts = new Integer[FILTER_ITEM_BANK_COLUMNS.length];
+    private final Boolean[] filterItemBankCanScrollForwards = new Boolean[FILTER_ITEM_BANK_COLUMNS.length];
+    private final Boolean[] filterItemBankCanScrollBackwards = new Boolean[FILTER_ITEM_BANK_COLUMNS.length];
+    private final String[][] filterItemNames =
+        new String[FILTER_ITEM_BANK_COLUMNS.length][FILTER_ITEM_BANK_SIZE];
+    private final Integer[][] filterItemHitCounts =
+        new Integer[FILTER_ITEM_BANK_COLUMNS.length][FILTER_ITEM_BANK_SIZE];
+    private final Boolean[][] filterItemSelected =
+        new Boolean[FILTER_ITEM_BANK_COLUMNS.length][FILTER_ITEM_BANK_SIZE];
+    private final Boolean[][] filterItemExists =
+        new Boolean[FILTER_ITEM_BANK_COLUMNS.length][FILTER_ITEM_BANK_SIZE];
+    private final String[] filterItemWildcardNames = new String[FILTER_ITEM_BANK_COLUMNS.length];
+
+    /** The position of a column index in FILTER_ITEM_BANK_COLUMNS, or -1 for an un-banked column. */
+    private static int filterItemBankSlot(int column) {
+        for (int b = 0; b < FILTER_ITEM_BANK_COLUMNS.length; b++) {
+            if (FILTER_ITEM_BANK_COLUMNS[b] == column) {
+                return b;
+            }
+        }
+        return -1;
+    }
+
+    private static int requireBankedColumn(int column) {
+        int b = filterItemBankSlot(column);
+        if (b < 0) {
+            throw new IllegalArgumentException("Column " + column + " has no filter item bank");
+        }
+        return b;
+    }
+
+    /**
+     * Phase 28 (D-28-32). Called once from SecondoExtension.init, after registerFilterObservers
+     * has filled filterColumns; never from a request. Creates one createItemBank(64) bank on each
+     * of category, tag and creator and nothing on the other five columns. Non-deprecated forms
+     * only: getItemAt, scrollPosition(), itemCount(), the canScroll*() values, and the item's
+     * name(), hitCount(), isSelected() and exists() values.
+     */
+    public void registerFilterItemBanks(PopupBrowser popupBrowser) {
+        if (filterColumns == null) {
+            // An ordering defect in init(), not a runtime condition: fail loudly rather than
+            // create a second set of column cursors here.
+            throw new IllegalStateException(
+                "registerFilterItemBanks needs registerFilterObservers to have run first");
+        }
+        for (int b = 0; b < FILTER_ITEM_BANK_COLUMNS.length; b++) {
+            final int bank = b;
+            BrowserFilterColumn col = filterColumns[FILTER_ITEM_BANK_COLUMNS[b]];
+            BrowserFilterItemBank itemBank = col.createItemBank(FILTER_ITEM_BANK_SIZE);
+            filterItemBanks[b] = itemBank;
+
+            itemBank.scrollPosition().markInterested();
+            itemBank.scrollPosition().addValueObserver(
+                (IntegerValueChangedCallback) v -> filterItemBankScrollPositions[bank] = v);
+            itemBank.itemCount().markInterested();
+            itemBank.itemCount().addValueObserver(
+                (IntegerValueChangedCallback) v -> filterItemBankItemCounts[bank] = v);
+            itemBank.canScrollForwards().markInterested();
+            itemBank.canScrollForwards().addValueObserver(
+                (BooleanValueChangedCallback) v -> filterItemBankCanScrollForwards[bank] = v);
+            itemBank.canScrollBackwards().markInterested();
+            itemBank.canScrollBackwards().addValueObserver(
+                (BooleanValueChangedCallback) v -> filterItemBankCanScrollBackwards[bank] = v);
+
+            for (int i = 0; i < FILTER_ITEM_BANK_SIZE; i++) {
+                final int slot = i;
+                BrowserFilterItem item = (BrowserFilterItem) itemBank.getItemAt(i);
+                item.name().markInterested();
+                item.name().addValueObserver(
+                    (StringValueChangedCallback) v -> filterItemNames[bank][slot] = (String) v);
+                item.hitCount().markInterested();
+                item.hitCount().addValueObserver(
+                    (IntegerValueChangedCallback) v -> filterItemHitCounts[bank][slot] = v);
+                item.isSelected().markInterested();
+                item.isSelected().addValueObserver(
+                    (BooleanValueChangedCallback) v -> filterItemSelected[bank][slot] = v);
+                item.exists().markInterested();
+                item.exists().addValueObserver(
+                    (BooleanValueChangedCallback) v -> filterItemExists[bank][slot] = v);
+            }
+
+            col.getWildcardItem().name().markInterested();
+            col.getWildcardItem().name().addValueObserver(
+                (StringValueChangedCallback) v -> filterItemWildcardNames[bank] = (String) v);
+        }
+    }
+
+    /** The bank on a banked column (0 category, 1 tag, 2 creator); IllegalArgumentException otherwise. */
+    public BrowserFilterItemBank getFilterItemBank(int column) {
+        return filterItemBanks[requireBankedColumn(column)];
+    }
+
+    /**
+     * The name cached at a window slot of a banked column, or null until observed. This is what
+     * browser/setFilterItemSelected compares against before it touches the selection.
+     */
+    public String getFilterItemName(int column, int slot) {
+        int b = requireBankedColumn(column);
+        if (slot < 0 || slot >= FILTER_ITEM_BANK_SIZE) {
+            throw new IllegalArgumentException(
+                "filter item slot out of range: 0-" + (FILTER_ITEM_BANK_SIZE - 1) + ", got " + slot);
+        }
+        return filterItemNames[b][slot];
+    }
+
+    /** The cached scroll position of a banked column's window, or null until observed. */
+    public Integer getFilterItemBankScrollPosition(int column) {
+        return filterItemBankScrollPositions[requireBankedColumn(column)];
+    }
+
+    /**
+     * D-28-32's browser/getFilterItems payload. `column`, `bankSize` and each item's `index` (its
+     * WINDOW slot; the absolute index is scrollPosition + index) are constants; every other value
+     * is JSON null until its observer fires.
+     */
+    public JsonObject getFilterItemBankState(int column) {
+        int b = requireBankedColumn(column);
+        JsonObject obj = new JsonObject();
+        obj.addProperty("column", FILTER_COLUMN_NAMES[column]);
+        obj.addProperty("bankSize", FILTER_ITEM_BANK_SIZE);
+        obj.addProperty("scrollPosition", filterItemBankScrollPositions[b]);
+        obj.addProperty("itemCount", filterItemBankItemCounts[b]);
+        obj.addProperty("canScrollBackwards", filterItemBankCanScrollBackwards[b]);
+        obj.addProperty("canScrollForwards", filterItemBankCanScrollForwards[b]);
+        obj.addProperty("entryCount", filterEntryCounts[column]);
+        obj.addProperty("wildcardName", filterItemWildcardNames[b]);
+        obj.addProperty("cursorName", filterNames[column]);
+        JsonArray items = new JsonArray();
+        for (int i = 0; i < FILTER_ITEM_BANK_SIZE; i++) {
+            JsonObject item = new JsonObject();
+            item.addProperty("index", i);
+            item.addProperty("name", filterItemNames[b][i]);
+            item.addProperty("hitCount", filterItemHitCounts[b][i]);
+            item.addProperty("isSelected", filterItemSelected[b][i]);
+            item.addProperty("exists", filterItemExists[b][i]);
+            items.add(item);
+        }
+        obj.add("items", items);
+        return obj;
+    }
 }

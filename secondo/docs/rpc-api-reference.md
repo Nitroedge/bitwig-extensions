@@ -2525,6 +2525,71 @@ Scroll the result bank window.
 |-----------|------|----------|-------------|
 | `direction` | string | yes | `"forward"`, `"backward"`, `"pageForward"`, `"pageBackward"` |
 
+### `browser/getFilterItems`
+
+Read one filter column's item bank: a 64-slot window over the column's entries (Phase 28,
+D-28-32). The banks exist only on `category`, `tag` and `creator`, created once at extension
+initialization; the five other columns have a cursor and no bank. A recall reads a banked column
+whole at its wildcard, after `browser/filterReset` and before any selection (D-28-33).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `column` | string | yes | `"category"`, `"tag"` or `"creator"` |
+
+Returns `{column, bankSize, scrollPosition, itemCount, canScrollBackwards, canScrollForwards,
+entryCount, wildcardName, cursorName, items: [{index, name, hitCount, isSelected, exists} x 64]}`.
+`column` echoes the request, `bankSize` is the constructed width (always `64`) and each item's
+`index` is its WINDOW slot - the entry's absolute index is `scrollPosition + index`. Those three
+are constants; every other value is JSON `null` until its observer fires (D-26-12). `entryCount`
+and `cursorName` are the column's own values, the ones `browser/getFilters` reports as
+`entryCount` and `name`. The bank is not part of `browser/getState` or `session/snapshot` and does
+not trigger a WebSocket `browser` change.
+
+Refusals: `-32602` for a missing `column` or any column other than the three.
+
+### `browser/scrollFilterItems`
+
+Scroll one filter column's bank window. It moves the window, never the column's cursor or
+selection; `"ok"` is not proof it moved - the next `browser/getFilterItems`'s `scrollPosition` is.
+Banks exist only on `category`, `tag` and `creator`, read at the wildcard before any selection.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `column` | string | yes | `"category"`, `"tag"` or `"creator"` |
+| `direction` | string | yes | `"forward"`, `"backward"`, `"pageForward"`, `"pageBackward"` |
+
+Returns `"ok"`. Refusals: `-32602` for a missing or un-banked `column`, or a missing or unknown
+`direction`.
+
+### `browser/setFilterItemSelected`
+
+Select (or deselect) the entry at one window slot of a filter column's bank, as a
+COMPARE-AND-SET: the name the bank has cached at `slot` must equal `name`, or nothing is touched
+and the call is refused. A list that moved between the caller's read and this select therefore
+cannot select the wrong entry. Banks exist only on `category`, `tag` and `creator`, and the recall
+reads the column at its wildcard before this select (D-28-33).
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `column` | string | yes | `"category"`, `"tag"` or `"creator"` |
+| `slot` | integer | yes | Window slot, `0`-`63` (the absolute index minus `scrollPosition`) |
+| `name` | string | yes | The entry name the caller read at `slot`; non-empty |
+| `selected` | boolean | no | Default `true`; `false` deselects the item |
+
+Returns `"ok"`, which means the selection was issued, not that it landed: the column's
+`cursorName` read back is the proof. No sleep, scheduling or deferred response is involved.
+
+Refusals:
+
+- `-32602` for a missing or un-banked `column`, a missing or non-integer `slot` or one outside
+  `0..63`, a missing or empty `name`, or a `selected` that is not a boolean. Every one is refused
+  before any Bitwig call.
+- `-32001` with message `FILTER_ITEM_NAME_MISMATCH` and data
+  `{column, slot, expected, observed, scrollPosition}` when the cached name at `slot` is not
+  `name`, including a slot whose name is not yet observed (`observed` is then `null`). No
+  selection is issued. `-32001` is the fork's general server-error slot, shared with
+  `ACTION_NOT_FOUND` and others; the message tells them apart.
+
 **Example request (browser domain):**
 
 ```json

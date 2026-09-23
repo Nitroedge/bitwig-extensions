@@ -187,6 +187,71 @@ public class BrowserHandler {
             }
             return new JsonPrimitive("ok");
         });
+
+        // --- Filter item bank (Phase 28, D-28-32) ---
+        //
+        // APPENDED after browser/scrollResults so every existing BrowserHandler.java line
+        // citation still points where it pointed; fully qualified names keep the import block
+        // untouched for the same reason. The banks exist on category, tag and creator only
+        // (StateCache.registerFilterItemBanks, created at init). The recall reads a banked column
+        // whole at its wildcard, before any selection (D-28-33).
+
+        dispatcher.register("browser/getFilterItems", params ->
+            stateCache.getFilterItemBankState(resolveBankedColumnIndex(params)));
+
+        // Moves the column's bank WINDOW, never its cursor. "ok" is never proof the window moved;
+        // the next read's scrollPosition is.
+        dispatcher.register("browser/scrollFilterItems", params -> {
+            int idx = resolveBankedColumnIndex(params);
+            String direction = requireString(params, "direction");
+            if (!SCROLL_DIRECTIONS.contains(direction)) {
+                throw new IllegalArgumentException(
+                    "Invalid direction: " + direction + ". Must be one of: " + SCROLL_DIRECTIONS);
+            }
+            com.bitwig.extension.controller.api.BrowserFilterItemBank bank =
+                stateCache.getFilterItemBank(idx);
+            switch (direction) {
+                case "forward": bank.scrollForwards(); break;
+                case "backward": bank.scrollBackwards(); break;
+                case "pageForward": bank.scrollPageForwards(); break;
+                case "pageBackward": bank.scrollPageBackwards(); break;
+            }
+            return new JsonPrimitive("ok");
+        });
+
+        // A COMPARE-AND-SET. The name cached at the window slot must be the caller's, or -32001
+        // FILTER_ITEM_NAME_MISMATCH is thrown and the item is never touched, so a list that moved
+        // between the caller's read and this select can never select the wrong entry. Every
+        // parameter is validated before any API call. No sleep, no scheduling, no deferred
+        // response (D-28-32).
+        dispatcher.register("browser/setFilterItemSelected", params -> {
+            int idx = resolveBankedColumnIndex(params);
+            int slot = requireFilterItemSlot(params);
+            String name = requireFilterItemName(params);
+            boolean selected = true;
+            if (params.has("selected")) {
+                com.google.gson.JsonElement raw = params.get("selected");
+                if (!raw.isJsonPrimitive() || !raw.getAsJsonPrimitive().isBoolean()) {
+                    throw new IllegalArgumentException("'selected' must be a boolean, got " + raw);
+                }
+                selected = requireBoolean(params, "selected");
+            }
+            String observed = stateCache.getFilterItemName(idx, slot);
+            if (!name.equals(observed)) {
+                JsonObject data = new JsonObject();
+                data.addProperty("column", requireString(params, "column"));
+                data.addProperty("slot", slot);
+                data.addProperty("expected", name);
+                data.addProperty("observed", observed);
+                data.addProperty("scrollPosition", stateCache.getFilterItemBankScrollPosition(idx));
+                throw new RpcException(-32001, "FILTER_ITEM_NAME_MISMATCH", data);
+            }
+            com.bitwig.extension.controller.api.BrowserFilterItem item =
+                (com.bitwig.extension.controller.api.BrowserFilterItem)
+                    stateCache.getFilterItemBank(idx).getItemAt(slot);
+            item.isSelected().set(selected);
+            return new JsonPrimitive("ok");
+        });
     }
 
     private CursorBrowserFilterItem resolveFilterCursor(JsonObject params) {
@@ -203,6 +268,67 @@ public class BrowserHandler {
                 "Invalid column: " + column + ". Must be one of: " + COLUMN_INDEX_MAP.keySet());
         }
         return idx;
+    }
+
+    /**
+     * Phase 28 (D-28-32): the column index of one of the three BANKED columns. Any other value,
+     * including the five un-banked column names, is an IllegalArgumentException (so -32602), in
+     * the harness's words.
+     */
+    private int resolveBankedColumnIndex(JsonObject params) {
+        String column = requireString(params, "column");
+        switch (column) {
+            case "category": return 0;
+            case "tag": return 1;
+            case "creator": return 2;
+            default:
+                throw new IllegalArgumentException(
+                    "Invalid filter item bank column: " + column
+                        + ". Must be one of: [category, tag, creator]");
+        }
+    }
+
+    /** A window slot: a JSON integer in 0..FILTER_ITEM_BANK_SIZE-1, or -32602. */
+    private static int requireFilterItemSlot(JsonObject params) {
+        int size = StateCache.FILTER_ITEM_BANK_SIZE;
+        com.google.gson.JsonElement raw = params.get("slot");
+        if (raw == null) {
+            throw new IllegalArgumentException(missingMessage("slot"));
+        }
+        if (!raw.isJsonPrimitive() || !raw.getAsJsonPrimitive().isNumber()) {
+            throw new IllegalArgumentException(
+                "filter item slot out of range: 0-" + (size - 1) + ", got " + raw);
+        }
+        double value = raw.getAsDouble();
+        if (value != Math.rint(value) || value < 0 || value >= size) {
+            throw new IllegalArgumentException(
+                "filter item slot out of range: 0-" + (size - 1) + ", got " + raw);
+        }
+        return (int) value;
+    }
+
+    /** The entry name a select compares against: a non-empty JSON string, or -32602. */
+    private static String requireFilterItemName(JsonObject params) {
+        com.google.gson.JsonElement raw = params.get("name");
+        if (raw == null || !raw.isJsonPrimitive() || !raw.getAsJsonPrimitive().isString()
+                || raw.getAsString().isEmpty()) {
+            throw new IllegalArgumentException(missingMessage("name"));
+        }
+        return raw.getAsString();
+    }
+
+    /**
+     * Phase 28 (D-28-32): the rpc package's RpcException under its simple name. It is declared
+     * here rather than imported because an import line would move every line below it, and the
+     * filter item bank's Java is appended precisely so no existing `BrowserHandler.java:<line>`
+     * citation moves. The dispatcher catches it as the RpcException it extends, so the wire
+     * shape is identical, and `new RpcException(-32001, ...)` stays readable to the conformance
+     * scan of custom codes.
+     */
+    private static final class RpcException extends dev.bcrick.secondo.rpc.RpcException {
+        RpcException(int code, String message, JsonObject data) {
+            super(code, message, data);
+        }
     }
 
 }

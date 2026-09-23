@@ -80,9 +80,19 @@ class VersionConsistencyTest {
     @Test
     void version_isTheReleaseThisEngineWasCutFor() {
         assertEquals(
-            "0.2.9",
+            "0.2.10",
             SecondoVersion.VERSION,
-            "The engine's version is 0.2.9 (secondo Phase 31 gap round, plan 31-21; bumped "
+            "The engine's version is 0.2.10 (secondo Phase 28 gap round 3, plan 28-19; bumped "
+                + "from 0.2.9 because this build adds the PER-COLUMN FILTER ITEM BANK (D-28-30, "
+                + "D-28-32): a 64-slot createItemBank on the category, tag and creator browser "
+                + "filter columns, read, paged and selected through three new methods -- "
+                + "browser/getFilterItems, browser/scrollFilterItems and "
+                + "browser/setFilterItemSelected, a compare-and-set that refuses -32001 "
+                + "FILTER_ITEM_NAME_MISMATCH without touching the item -- so the dispatchable "
+                + "surface MOVES 342 -> 345 and the method count discriminates this build again "
+                + "alongside the version. 0.2.10 is the first two-digit patch number, so it must "
+                + "be ordered numerically, never as text. "
+                + "0.2.9 was secondo Phase 31 gap round, plan 31-21; bumped "
                 + "from 0.2.8 because this build changes wire behaviour and diagnose's version "
                 + "row must be able to tell it from the build before it -- and here that row is "
                 + "the ONLY thing that can, because NOTHING IN THIS DELTA REGISTERS OR REMOVES "

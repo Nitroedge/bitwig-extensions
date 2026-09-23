@@ -1,6 +1,8 @@
 package dev.bcrick.secondo.handlers;
 
 import com.bitwig.extension.controller.api.BrowserFilterColumn;
+import com.bitwig.extension.controller.api.BrowserFilterItem;
+import com.bitwig.extension.controller.api.BrowserFilterItemBank;
 import com.bitwig.extension.controller.api.BrowserResultsItemBank;
 import com.bitwig.extension.controller.api.CursorBrowserFilterItem;
 import com.bitwig.extension.controller.api.CursorDevice;
@@ -77,7 +79,7 @@ class BrowserHandlerTest {
     // --- Registration ---
 
     @Test
-    void registersTwentyThreeMethods() {
+    void registersTwentySixMethods() {
         var methods = dispatcher.getRegisteredMethods();
         // Phase 17 — 11 methods
         assertTrue(methods.contains("browser/browsePresets"));
@@ -105,7 +107,11 @@ class BrowserHandlerTest {
         // Phase 26 — 2 master chain openers
         assertTrue(methods.contains("browser/browseMasterInsertDevice"));
         assertTrue(methods.contains("browser/browseMasterPresets"));
-        assertEquals(23, methods.size());
+        // Phase 28 — the filter item bank (D-28-32)
+        assertTrue(methods.contains("browser/getFilterItems"));
+        assertTrue(methods.contains("browser/scrollFilterItems"));
+        assertTrue(methods.contains("browser/setFilterItemSelected"));
+        assertEquals(26, methods.size());
     }
 
     // --- setContentType validation ---
@@ -330,6 +336,251 @@ class BrowserHandlerTest {
     void scrollResults_pageBackward_callsBankScrollPageBackwards() {
         dispatcher.handle(rpc("browser/scrollResults", "{\"direction\":\"pageBackward\"}"));
         verify(mockResultBank).scrollPageBackwards();
+    }
+
+    // --- Phase 28 (D-28-32): the filter item bank ---
+
+    @Test
+    void getFilterItems_tag_returnsTheStateCachePayload() {
+        JsonObject payload = new JsonObject();
+        payload.addProperty("column", "tag");
+        payload.addProperty("bankSize", 64);
+        when(mockStateCache.getFilterItemBankState(1)).thenReturn(payload);
+
+        String response = dispatcher.handle(rpc("browser/getFilterItems", "{\"column\":\"tag\"}"));
+
+        assertContains(response, "\"result\":{\"column\":\"tag\",\"bankSize\":64}");
+        verify(mockStateCache).getFilterItemBankState(1);
+    }
+
+    @Test
+    void getFilterItems_categoryAndCreator_resolveToColumnsZeroAndTwo() {
+        when(mockStateCache.getFilterItemBankState(anyInt())).thenReturn(new JsonObject());
+        dispatcher.handle(rpc("browser/getFilterItems", "{\"column\":\"category\"}"));
+        dispatcher.handle(rpc("browser/getFilterItems", "{\"column\":\"creator\"}"));
+        verify(mockStateCache).getFilterItemBankState(0);
+        verify(mockStateCache).getFilterItemBankState(2);
+    }
+
+    @Test
+    void getFilterItems_unbankedColumn_returnsError() {
+        String response = dispatcher.handle(rpc("browser/getFilterItems",
+            "{\"column\":\"device\"}"));
+        assertContains(response, "-32602");
+        assertContains(response, "device");
+        assertContains(response, "[category, tag, creator]");
+        verify(mockStateCache, never()).getFilterItemBankState(anyInt());
+    }
+
+    @Test
+    void getFilterItems_missingColumn_returnsError() {
+        String response = dispatcher.handle(rpc("browser/getFilterItems", "{}"));
+        assertContains(response, "-32602");
+        assertContains(response, "column");
+        verify(mockStateCache, never()).getFilterItemBankState(anyInt());
+    }
+
+    // --- Phase 28 (D-28-32): scrollFilterItems ---
+
+    private BrowserFilterItemBank stubTagBank() {
+        BrowserFilterItemBank bank = mock(BrowserFilterItemBank.class);
+        when(mockStateCache.getFilterItemBank(1)).thenReturn(bank);
+        return bank;
+    }
+
+    @Test
+    void scrollFilterItems_forward_callsOnlyBankScrollForwards() {
+        BrowserFilterItemBank bank = stubTagBank();
+        String response = dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\",\"direction\":\"forward\"}"));
+        assertContains(response, "\"ok\"");
+        verify(bank).scrollForwards();
+        verifyNoMoreInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_backward_callsOnlyBankScrollBackwards() {
+        BrowserFilterItemBank bank = stubTagBank();
+        dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\",\"direction\":\"backward\"}"));
+        verify(bank).scrollBackwards();
+        verifyNoMoreInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_pageForward_callsOnlyBankScrollPageForwards() {
+        BrowserFilterItemBank bank = stubTagBank();
+        dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\",\"direction\":\"pageForward\"}"));
+        verify(bank).scrollPageForwards();
+        verifyNoMoreInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_pageBackward_callsOnlyBankScrollPageBackwards() {
+        BrowserFilterItemBank bank = stubTagBank();
+        dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\",\"direction\":\"pageBackward\"}"));
+        verify(bank).scrollPageBackwards();
+        verifyNoMoreInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_invalidDirection_isRefusedBeforeAnyScroll() {
+        BrowserFilterItemBank bank = stubTagBank();
+        String response = dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\",\"direction\":\"sideways\"}"));
+        assertContains(response, "-32602");
+        assertContains(response, "sideways");
+        verifyNoInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_missingDirection_isRefused() {
+        BrowserFilterItemBank bank = stubTagBank();
+        String response = dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"tag\"}"));
+        assertContains(response, "-32602");
+        assertContains(response, "direction");
+        verifyNoInteractions(bank);
+    }
+
+    @Test
+    void scrollFilterItems_unbankedColumn_isRefused() {
+        String response = dispatcher.handle(rpc("browser/scrollFilterItems",
+            "{\"column\":\"location\",\"direction\":\"forward\"}"));
+        assertContains(response, "-32602");
+        assertContains(response, "location");
+        verify(mockStateCache, never()).getFilterItemBank(anyInt());
+    }
+
+    // --- Phase 28 (D-28-32): setFilterItemSelected, the compare-and-set ---
+
+    /** The tag bank with a castable item at slot 5 whose selection is `selected`. */
+    private SettableBooleanValue stubTagItemAtSlotFive() {
+        BrowserFilterItemBank bank = stubTagBank();
+        BrowserFilterItem item = mock(BrowserFilterItem.class);
+        SettableBooleanValue selected = mock(SettableBooleanValue.class);
+        when(item.isSelected()).thenReturn(selected);
+        when(bank.getItemAt(5)).thenReturn(item);
+        return selected;
+    }
+
+    @Test
+    void setFilterItemSelected_matchingName_setsTheItemSelected() {
+        SettableBooleanValue selected = stubTagItemAtSlotFive();
+        when(mockStateCache.getFilterItemName(1, 5)).thenReturn("secondo");
+
+        String response = dispatcher.handle(rpc("browser/setFilterItemSelected",
+            "{\"column\":\"tag\",\"slot\":5,\"name\":\"secondo\"}"));
+
+        assertContains(response, "\"result\":\"ok\"");
+        verify(selected).set(true);
+        verifyNoMoreInteractions(selected);
+    }
+
+    @Test
+    void setFilterItemSelected_selectedFalse_setsTheItemDeselected() {
+        SettableBooleanValue selected = stubTagItemAtSlotFive();
+        when(mockStateCache.getFilterItemName(1, 5)).thenReturn("secondo");
+
+        String response = dispatcher.handle(rpc("browser/setFilterItemSelected",
+            "{\"column\":\"tag\",\"slot\":5,\"name\":\"secondo\",\"selected\":false}"));
+
+        assertContains(response, "\"result\":\"ok\"");
+        verify(selected).set(false);
+        verifyNoMoreInteractions(selected);
+    }
+
+    @Test
+    void setFilterItemSelected_mismatchingName_refusesMinus32001AndNeverSets() {
+        SettableBooleanValue selected = stubTagItemAtSlotFive();
+        when(mockStateCache.getFilterItemName(1, 5)).thenReturn("Bass");
+        when(mockStateCache.getFilterItemBankScrollPosition(1)).thenReturn(64);
+
+        String response = dispatcher.handle(rpc("browser/setFilterItemSelected",
+            "{\"column\":\"tag\",\"slot\":5,\"name\":\"secondo\"}"));
+
+        JsonObject error = com.google.gson.JsonParser.parseString(response).getAsJsonObject()
+            .getAsJsonObject("error");
+        assertEquals(-32001, error.get("code").getAsInt());
+        assertEquals("FILTER_ITEM_NAME_MISMATCH", error.get("message").getAsString());
+        JsonObject data = error.getAsJsonObject("data");
+        assertEquals(java.util.Set.of("column", "slot", "expected", "observed", "scrollPosition"),
+            data.keySet());
+        assertEquals("tag", data.get("column").getAsString());
+        assertEquals(5, data.get("slot").getAsInt());
+        assertEquals("secondo", data.get("expected").getAsString());
+        assertEquals("Bass", data.get("observed").getAsString());
+        assertEquals(64, data.get("scrollPosition").getAsInt());
+        verify(selected, never()).set(anyBoolean());
+        verify(mockStateCache, never()).getFilterItemBank(anyInt());
+    }
+
+    @Test
+    void setFilterItemSelected_unobservedName_isAMismatchWithANullObserved() {
+        SettableBooleanValue selected = stubTagItemAtSlotFive();
+        when(mockStateCache.getFilterItemName(1, 5)).thenReturn(null);
+        // Mockito answers 0 for an unstubbed Integer; the engine's unobserved value is null.
+        when(mockStateCache.getFilterItemBankScrollPosition(1)).thenReturn(null);
+
+        String response = dispatcher.handle(rpc("browser/setFilterItemSelected",
+            "{\"column\":\"tag\",\"slot\":5,\"name\":\"secondo\"}"));
+
+        assertContains(response, "-32001");
+        assertContains(response, "\"observed\":null");
+        assertContains(response, "\"scrollPosition\":null");
+        verify(selected, never()).set(anyBoolean());
+    }
+
+    @Test
+    void setFilterItemSelected_slotMinusOne_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":-1,\"name\":\"secondo\"}", "slot");
+    }
+
+    @Test
+    void setFilterItemSelected_slotSixtyFour_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":64,\"name\":\"secondo\"}", "64");
+    }
+
+    @Test
+    void setFilterItemSelected_nonIntegerSlot_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":1.5,\"name\":\"secondo\"}", "slot");
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":\"5\",\"name\":\"secondo\"}", "slot");
+    }
+
+    @Test
+    void setFilterItemSelected_missingSlot_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"name\":\"secondo\"}", "slot");
+    }
+
+    @Test
+    void setFilterItemSelected_missingOrEmptyName_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":5}", "name");
+        assertRefusedBeforeAnyCall("{\"column\":\"tag\",\"slot\":5,\"name\":\"\"}", "name");
+    }
+
+    @Test
+    void setFilterItemSelected_nonBooleanSelected_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall(
+            "{\"column\":\"tag\",\"slot\":5,\"name\":\"secondo\",\"selected\":\"yes\"}", "selected");
+    }
+
+    @Test
+    void setFilterItemSelected_unbankedColumn_isRefusedBeforeAnyCall() {
+        assertRefusedBeforeAnyCall(
+            "{\"column\":\"device\",\"slot\":5,\"name\":\"secondo\"}", "device");
+    }
+
+    /** A -32602 naming `mentions`, with neither the cache's name nor any bank item touched. */
+    private void assertRefusedBeforeAnyCall(String params, String mentions) {
+        SettableBooleanValue selected = stubTagItemAtSlotFive();
+        String response = dispatcher.handle(rpc("browser/setFilterItemSelected", params));
+        assertContains(response, "-32602");
+        assertContains(response, mentions);
+        verify(mockStateCache, never()).getFilterItemName(anyInt(), anyInt());
+        verify(mockStateCache, never()).getFilterItemBank(anyInt());
+        verify(selected, never()).set(anyBoolean());
     }
 
     // --- Helpers ---

@@ -198,6 +198,7 @@ public class SecondoExtension extends ControllerExtension {
         stateCache.registerMasterChainObservers(masterDeviceBank);
         stateCache.registerBrowserObservers(popupBrowser);
         stateCache.registerFilterObservers(popupBrowser);
+        stateCache.registerFilterItemBanks(popupBrowser);
         stateCache.registerNoteInputObservers(arpeggiator, noteLatch);
         stateCache.registerGrooveObservers(groove);
 

@@ -251,6 +251,181 @@ class StateCacheObserverTest {
         assertTrue(category.get("name").isJsonNull());
     }
 
+    // --- Phase 28 (D-28-32): the per-column filter item bank ---
+
+    /**
+     * Gives the three banked columns (category 0, tag 1, creator 2) an explicit bank whose
+     * getItemAt(i) returns a castable BrowserFilterItem: a deep stub's getItemAt is erased to
+     * ObjectProxy and fails the production cast. items[b][i] is bank b's slot i.
+     */
+    private static BrowserFilterItemBank[] stubFilterItemBanks(BrowserFilterColumn[] columns,
+                                                               BrowserFilterItem[][] items) {
+        BrowserFilterItemBank[] banks = new BrowserFilterItemBank[3];
+        for (int b = 0; b < 3; b++) {
+            banks[b] = mock(BrowserFilterItemBank.class, RETURNS_DEEP_STUBS);
+            when(columns[b].createItemBank(StateCache.FILTER_ITEM_BANK_SIZE)).thenReturn(banks[b]);
+            items[b] = new BrowserFilterItem[StateCache.FILTER_ITEM_BANK_SIZE];
+            for (int i = 0; i < StateCache.FILTER_ITEM_BANK_SIZE; i++) {
+                items[b][i] = mock(BrowserFilterItem.class, RETURNS_DEEP_STUBS);
+                when(banks[b].getItemAt(i)).thenReturn(items[b][i]);
+            }
+        }
+        return banks;
+    }
+
+    private static StringValueChangedCallback stringObserver(StringValue value) {
+        ArgumentCaptor<StringValueChangedCallback> captor =
+                ArgumentCaptor.forClass(StringValueChangedCallback.class);
+        verify(value).addValueObserver(captor.capture());
+        return captor.getValue();
+    }
+
+    @Test
+    void registerFilterItemBanks_banksOnlyCategoryTagAndCreatorAndMarksEveryValueInterested() {
+        BrowserFilterColumn[] columns = new BrowserFilterColumn[8];
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), columns,
+                new CursorBrowserFilterItem[8]);
+        BrowserFilterItem[][] items = new BrowserFilterItem[3][];
+        BrowserFilterItemBank[] banks = stubFilterItemBanks(columns, items);
+
+        cache.registerFilterObservers(popup);
+        cache.registerFilterItemBanks(popup);
+
+        for (int b = 0; b < 3; b++) {
+            verify(columns[b]).createItemBank(64);
+            verify(banks[b].scrollPosition()).markInterested();
+            verify(banks[b].itemCount()).markInterested();
+            verify(banks[b].canScrollForwards()).markInterested();
+            verify(banks[b].canScrollBackwards()).markInterested();
+            verify(columns[b].getWildcardItem().name()).markInterested();
+            for (int i = 0; i < 64; i++) {
+                verify(items[b][i].name()).markInterested();
+                verify(items[b][i].hitCount()).markInterested();
+                verify(items[b][i].isSelected()).markInterested();
+                verify(items[b][i].exists()).markInterested();
+            }
+        }
+        // The five un-banked columns (device, deviceType, fileType, location, smartCollection)
+        // never receive a bank of any size.
+        for (int i = 3; i < 8; i++) {
+            verify(columns[i], never()).createItemBank(anyInt());
+        }
+    }
+
+    @Test
+    void getFilterItemBankState_isNullUntilObservedThenCarriesTheObservedValues() {
+        BrowserFilterColumn[] columns = new BrowserFilterColumn[8];
+        CursorBrowserFilterItem[] cursors = new CursorBrowserFilterItem[8];
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), columns, cursors);
+        BrowserFilterItem[][] items = new BrowserFilterItem[3][];
+        BrowserFilterItemBank[] banks = stubFilterItemBanks(columns, items);
+        cache.registerFilterObservers(popup);
+        cache.registerFilterItemBanks(popup);
+
+        JsonObject before = cache.getFilterItemBankState(1);
+        assertEquals("tag", before.get("column").getAsString());
+        assertEquals(64, before.get("bankSize").getAsInt());
+        for (String key : new String[] {"scrollPosition", "itemCount", "canScrollBackwards",
+                "canScrollForwards", "entryCount", "wildcardName", "cursorName"}) {
+            assertTrue(before.get(key).isJsonNull(), key + " should be null until observed");
+        }
+        JsonArray beforeItems = before.getAsJsonArray("items");
+        assertEquals(64, beforeItems.size());
+        for (int i = 0; i < 64; i++) {
+            JsonObject item = beforeItems.get(i).getAsJsonObject();
+            assertEquals(i, item.get("index").getAsInt());
+            for (String key : new String[] {"name", "hitCount", "isSelected", "exists"}) {
+                assertTrue(item.get(key).isJsonNull(), "items[" + i + "]." + key);
+            }
+        }
+        assertNull(cache.getFilterItemName(1, 2));
+
+        intObserver(banks[1].scrollPosition()).valueChanged(64);
+        intObserver(banks[1].itemCount()).valueChanged(140);
+        boolObserver(banks[1].canScrollBackwards()).valueChanged(true);
+        boolObserver(banks[1].canScrollForwards()).valueChanged(true);
+        intObserver(columns[1].entryCount()).valueChanged(141);
+        stringObserver(columns[1].getWildcardItem().name()).valueChanged("Any Tag");
+        stringObserver(cursors[1].name()).valueChanged("Any Tag");
+        stringObserver(items[1][2].name()).valueChanged("secondo");
+        intObserver(items[1][2].hitCount()).valueChanged(0);
+        boolObserver(items[1][2].isSelected()).valueChanged(false);
+        boolObserver(items[1][2].exists()).valueChanged(true);
+
+        JsonObject after = cache.getFilterItemBankState(1);
+        assertEquals(64, after.get("scrollPosition").getAsInt());
+        assertEquals(140, after.get("itemCount").getAsInt());
+        assertTrue(after.get("canScrollBackwards").getAsBoolean());
+        assertTrue(after.get("canScrollForwards").getAsBoolean());
+        assertEquals(141, after.get("entryCount").getAsInt());
+        assertEquals("Any Tag", after.get("wildcardName").getAsString());
+        assertEquals("Any Tag", after.get("cursorName").getAsString());
+        JsonObject slot2 = after.getAsJsonArray("items").get(2).getAsJsonObject();
+        assertEquals(2, slot2.get("index").getAsInt());
+        assertEquals("secondo", slot2.get("name").getAsString());
+        // An OBSERVED zero and an observed false are values, not nulls.
+        assertEquals(0, slot2.get("hitCount").getAsInt());
+        assertFalse(slot2.get("isSelected").getAsBoolean());
+        assertTrue(slot2.get("exists").getAsBoolean());
+        assertEquals("secondo", cache.getFilterItemName(1, 2));
+        assertEquals(64, cache.getFilterItemBankScrollPosition(1).intValue());
+        // Another bank's values did not move with the tag bank's.
+        assertTrue(cache.getFilterItemBankState(0).get("scrollPosition").isJsonNull());
+        assertTrue(cache.getFilterItemBankState(2).getAsJsonArray("items").get(2)
+                .getAsJsonObject().get("name").isJsonNull());
+        assertSame(banks[1], cache.getFilterItemBank(1));
+    }
+
+    @Test
+    void filterItemBank_isKeptOutOfTheBrowserState() {
+        BrowserFilterColumn[] columns = new BrowserFilterColumn[8];
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), columns,
+                new CursorBrowserFilterItem[8]);
+        BrowserFilterItem[][] items = new BrowserFilterItem[3][];
+        BrowserFilterItemBank[] banks = stubFilterItemBanks(columns, items);
+        cache.registerBrowserObservers(popup);
+        cache.registerFilterObservers(popup);
+        String browserBefore = cache.getBrowserState().toString();
+
+        cache.registerFilterItemBanks(popup);
+        intObserver(banks[1].itemCount()).valueChanged(140);
+        stringObserver(items[1][0].name()).valueChanged("secondo");
+        stringObserver(columns[1].getWildcardItem().name()).valueChanged("Any Tag");
+
+        // Neither the registration nor an observed bank value reaches getBrowserState(), which
+        // session/snapshot and the WebSocket change hash both read.
+        assertEquals(browserBefore, cache.getBrowserState().toString());
+        assertFalse(cache.getBrowserState().toString().contains("secondo"));
+        assertFalse(cache.getSnapshot().getAsJsonObject("browser").has("filterItems"));
+    }
+
+    @Test
+    void filterItemBank_refusesAnUnbankedColumnAndAnOutOfRangeSlot() {
+        BrowserFilterColumn[] columns = new BrowserFilterColumn[8];
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), columns,
+                new CursorBrowserFilterItem[8]);
+        stubFilterItemBanks(columns, new BrowserFilterItem[3][]);
+        cache.registerFilterObservers(popup);
+        cache.registerFilterItemBanks(popup);
+
+        assertThrows(IllegalArgumentException.class, () -> cache.getFilterItemBankState(3));
+        assertThrows(IllegalArgumentException.class, () -> cache.getFilterItemBank(7));
+        assertThrows(IllegalArgumentException.class, () -> cache.getFilterItemName(1, 64));
+        assertThrows(IllegalArgumentException.class, () -> cache.getFilterItemName(1, -1));
+    }
+
+    @Test
+    void registerFilterItemBanks_beforeTheFilterObserversIsAnOrderingDefect() {
+        PopupBrowser popup = browserWithCastableItems(
+                mock(BrowserResultsItemBank.class, RETURNS_DEEP_STUBS), new BrowserFilterColumn[8],
+                new CursorBrowserFilterItem[8]);
+        assertThrows(IllegalStateException.class, () -> cache.registerFilterItemBanks(popup));
+    }
+
     private static List<Integer> jsonInts(JsonArray values) {
         List<Integer> result = new ArrayList<>();
         values.forEach(value -> result.add(value.getAsInt()));
